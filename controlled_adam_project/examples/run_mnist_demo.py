@@ -6,6 +6,7 @@ import argparse
 import csv
 import gzip
 import random
+import re
 import struct
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,6 +48,15 @@ class EpochMetrics:
     mean_alpha: float | None = None
     mean_rho: float | None = None
     accepted_rate: float | None = None
+
+
+@dataclass
+class OptimizerRun:
+    """Metrics and optional step diagnostics for one optimizer variant."""
+
+    name: str
+    metrics: list[EpochMetrics]
+    step_logs: list[ControlledAdamStep] | None = None
 
 
 def set_seed(seed: int) -> None:
@@ -258,6 +268,12 @@ def train_controlled_adam(
     alpha_max: float,
     min_alpha_factor: float,
     max_alpha_factor: float,
+    trust_region_expand: bool,
+    trust_region_rho_threshold: float,
+    trust_region_alpha_threshold: float,
+    trust_region_expand_factor: float,
+    use_rho_ema: bool = True,
+    reject_bad_steps: bool = True,
 ) -> tuple[list[EpochMetrics], list[ControlledAdamStep]]:
     """Train a model with same-minibatch controlled Adam."""
     optimizer = TorchControlledAdam(
@@ -268,8 +284,14 @@ def train_controlled_adam(
         alpha_min=alpha_min,
         alpha_max=alpha_max,
         rho_beta=rho_beta,
+        use_rho_ema=use_rho_ema,
         min_alpha_factor=min_alpha_factor,
         max_alpha_factor=max_alpha_factor,
+        trust_region_expand=trust_region_expand,
+        trust_region_rho_threshold=trust_region_rho_threshold,
+        trust_region_alpha_threshold=trust_region_alpha_threshold,
+        trust_region_expand_factor=trust_region_expand_factor,
+        reject_bad_steps=reject_bad_steps,
         max_backtracks=3,
     )
     metrics = []
@@ -315,8 +337,7 @@ def train_controlled_adam(
 
 def save_epoch_metrics(
     path: Path,
-    vanilla: list[EpochMetrics],
-    controlled: list[EpochMetrics],
+    runs: list[OptimizerRun],
 ) -> None:
     """Save epoch-level metrics as CSV."""
     with path.open("w", newline="") as handle:
@@ -334,11 +355,11 @@ def save_epoch_metrics(
                 "accepted_rate",
             ]
         )
-        for name, rows in [("vanilla_adam", vanilla), ("controlled_adam", controlled)]:
-            for row in rows:
+        for run in runs:
+            for row in run.metrics:
                 writer.writerow(
                     [
-                        name,
+                        run.name,
                         row.epoch,
                         row.train_loss,
                         row.train_accuracy,
@@ -348,64 +369,77 @@ def save_epoch_metrics(
                         "" if row.mean_rho is None else row.mean_rho,
                         "" if row.accepted_rate is None else row.accepted_rate,
                     ]
-                )
+            )
 
 
-def save_step_logs(path: Path, step_logs: list[ControlledAdamStep]) -> None:
+def save_step_logs(
+    path: Path,
+    step_logs: list[ControlledAdamStep],
+    optimizer_name: str | None = None,
+) -> None:
     """Save controlled Adam step diagnostics as CSV."""
     with path.open("w", newline="") as handle:
         writer = csv.writer(handle)
-        writer.writerow(
-            [
-                "step",
-                "loss_before",
-                "loss_after",
-                "alpha",
-                "rho",
-                "predicted_decrease",
-                "actual_decrease",
-                "accepted",
-                "descent_score",
-                "backtracks",
-                "rho_ema",
-            ]
-        )
+        header = [
+            "step",
+            "loss_before",
+            "loss_after",
+            "alpha",
+            "rho",
+            "predicted_decrease",
+            "actual_decrease",
+            "accepted",
+            "descent_score",
+            "backtracks",
+            "rho_ema",
+            "alpha_next",
+            "alpha_update_factor",
+            "trust_region_expanded",
+        ]
+        if optimizer_name is not None:
+            header.insert(0, "optimizer")
+        writer.writerow(header)
         for i, log in enumerate(step_logs):
-            writer.writerow(
-                [
-                    i,
-                    log.loss_before,
-                    log.loss_after,
-                    log.alpha,
-                    log.rho,
-                    log.predicted_decrease,
-                    log.actual_decrease,
-                    int(log.accepted),
-                    log.descent_score,
-                    log.backtracks,
-                    log.rho_ema,
-                ]
-            )
+            row = [
+                i,
+                log.loss_before,
+                log.loss_after,
+                log.alpha,
+                log.rho,
+                log.predicted_decrease,
+                log.actual_decrease,
+                int(log.accepted),
+                log.descent_score,
+                log.backtracks,
+                log.rho_ema,
+                log.alpha_next,
+                log.alpha_update_factor,
+                int(log.trust_region_expanded),
+            ]
+            if optimizer_name is not None:
+                row.insert(0, optimizer_name)
+            writer.writerow(row)
+
+
+def slugify(name: str) -> str:
+    """Return a filesystem-friendly optimizer name."""
+    return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
 
 
 def plot_metrics(
     output_dir: Path,
     dataset_name: str,
-    vanilla: list[EpochMetrics],
-    controlled: list[EpochMetrics],
-    step_logs: list[ControlledAdamStep],
+    runs: list[OptimizerRun],
 ) -> None:
     """Save comparison plots."""
-    epochs = [row.epoch for row in vanilla]
+    epochs = [row.epoch for row in runs[0].metrics]
 
     plt.figure(figsize=(7, 4))
-    plt.plot(epochs, [row.train_loss for row in vanilla], label="Adam train")
-    plt.plot(epochs, [row.test_loss for row in vanilla], label="Adam test")
-    plt.plot(epochs, [row.train_loss for row in controlled], label="Controlled train")
-    plt.plot(epochs, [row.test_loss for row in controlled], label="Controlled test")
+    for run in runs:
+        plt.plot(epochs, [row.test_loss for row in run.metrics], label=run.name)
     plt.xlabel("Epoch")
-    plt.ylabel("Cross-entropy")
-    plt.title(f"{dataset_name} loss")
+    plt.ylabel("Test cross-entropy")
+    plt.title(f"{dataset_name} test loss")
     plt.grid(True)
     plt.legend()
     plt.tight_layout()
@@ -413,8 +447,8 @@ def plot_metrics(
     plt.close()
 
     plt.figure(figsize=(7, 4))
-    plt.plot(epochs, [row.test_accuracy for row in vanilla], label="Adam")
-    plt.plot(epochs, [row.test_accuracy for row in controlled], label="Controlled Adam")
+    for run in runs:
+        plt.plot(epochs, [row.test_accuracy for row in run.metrics], label=run.name)
     plt.xlabel("Epoch")
     plt.ylabel("Test accuracy")
     plt.title(f"{dataset_name} test accuracy")
@@ -424,34 +458,46 @@ def plot_metrics(
     plt.savefig(output_dir / f"{dataset_name}_accuracy.png", dpi=160)
     plt.close()
 
-    plt.figure(figsize=(7, 4))
-    plt.plot([log.alpha for log in step_logs])
-    plt.xlabel("Minibatch step")
-    plt.ylabel("alpha")
-    plt.title("Controlled Adam global step size")
-    plt.grid(True)
-    plt.tight_layout()
-    plt.savefig(output_dir / f"{dataset_name}_controlled_alpha.png", dpi=160)
-    plt.close()
-
-    finite = [(i, log.rho) for i, log in enumerate(step_logs) if np.isfinite(log.rho)]
-    if finite:
+    runs_with_steps = [run for run in runs if run.step_logs]
+    if runs_with_steps:
         plt.figure(figsize=(7, 4))
-        plt.plot([i for i, _ in finite], [rho for _, rho in finite], label="rho")
-        finite_ema = [
-            (i, log.rho_ema)
-            for i, log in enumerate(step_logs)
-            if np.isfinite(log.rho_ema)
-        ]
-        if finite_ema:
-            plt.plot(
-                [i for i, _ in finite_ema],
-                [rho for _, rho in finite_ema],
-                label="rho EMA",
-            )
+        for run in runs_with_steps:
+            assert run.step_logs is not None
+            plt.plot([log.alpha for log in run.step_logs], label=run.name)
+            expanded_steps = [
+                (i, log.alpha)
+                for i, log in enumerate(run.step_logs)
+                if log.trust_region_expanded
+            ]
+            if expanded_steps:
+                plt.scatter(
+                    [i for i, _ in expanded_steps],
+                    [alpha for _, alpha in expanded_steps],
+                    s=12,
+                    zorder=3,
+                )
         plt.xlabel("Minibatch step")
-        plt.ylabel("rho")
-        plt.title("Controlled Adam same-minibatch rho")
+        plt.ylabel("alpha")
+        plt.title("Adam-direction global step size")
+        plt.grid(True)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(output_dir / f"{dataset_name}_controlled_alpha.png", dpi=160)
+        plt.close()
+
+        plt.figure(figsize=(7, 4))
+        for run in runs_with_steps:
+            assert run.step_logs is not None
+            finite = [
+                (i, log.rho_ema)
+                for i, log in enumerate(run.step_logs)
+                if np.isfinite(log.rho_ema)
+            ]
+            if finite:
+                plt.plot([i for i, _ in finite], [rho for _, rho in finite], label=run.name)
+        plt.xlabel("Minibatch step")
+        plt.ylabel("rho control signal")
+        plt.title("Same-minibatch rho control signal")
         plt.grid(True)
         plt.legend()
         plt.tight_layout()
@@ -479,6 +525,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--controlled-alpha-max", type=float, default=5e-2)
     parser.add_argument("--controlled-min-alpha-factor", type=float, default=0.8)
     parser.add_argument("--controlled-max-alpha-factor", type=float, default=1.05)
+    parser.add_argument(
+        "--controlled-trust-region-expand",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser.add_argument("--controlled-trust-rho-threshold", type=float, default=0.9)
+    parser.add_argument("--controlled-trust-alpha-threshold", type=float, default=1e-4)
+    parser.add_argument("--controlled-trust-expand-factor", type=float, default=1.5)
+    parser.add_argument(
+        "--ablation",
+        action="store_true",
+        help="Run Adam-direction ablations instead of only vanilla vs controlled.",
+    )
     parser.add_argument("--data-dir", type=Path, default=Path("data"))
     parser.add_argument(
         "--fashion-folder",
@@ -490,6 +549,57 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--download", action="store_true")
     parser.add_argument("--device", default="cpu")
     return parser.parse_args()
+
+
+def run_controlled_variant(
+    name: str,
+    base_state: dict[str, torch.Tensor],
+    train_data,
+    eval_train_loader: DataLoader,
+    eval_test_loader: DataLoader,
+    criterion: nn.Module,
+    device: torch.device,
+    args: argparse.Namespace,
+    *,
+    alpha0: float,
+    kp: float,
+    rho_beta: float,
+    min_alpha_factor: float,
+    max_alpha_factor: float,
+    trust_region_expand: bool,
+    use_rho_ema: bool,
+    reject_bad_steps: bool,
+    alpha_min: float | None = None,
+    alpha_max: float | None = None,
+) -> OptimizerRun:
+    """Train one Adam-direction variant from the shared initialization."""
+    model = SmallMLP().to(device)
+    model.load_state_dict(base_state)
+    train_loader = make_loader(train_data, args.batch_size, True, args.seed)
+    metrics, step_logs = train_controlled_adam(
+        model,
+        train_loader,
+        eval_train_loader,
+        eval_test_loader,
+        criterion,
+        device,
+        args.epochs,
+        alpha0,
+        kp,
+        args.controlled_rho_star,
+        rho_beta,
+        args.controlled_alpha_min if alpha_min is None else alpha_min,
+        args.controlled_alpha_max if alpha_max is None else alpha_max,
+        min_alpha_factor,
+        max_alpha_factor,
+        trust_region_expand,
+        args.controlled_trust_rho_threshold,
+        args.controlled_trust_alpha_threshold,
+        args.controlled_trust_expand_factor,
+        use_rho_ema=use_rho_ema,
+        reject_bad_steps=reject_bad_steps,
+    )
+    return OptimizerRun(name, metrics, step_logs)
 
 
 def main() -> None:
@@ -508,21 +618,23 @@ def main() -> None:
         args.download,
         args.fashion_folder,
     )
-    train_loader_vanilla = make_loader(train_data, args.batch_size, True, args.seed)
-    train_loader_controlled = make_loader(train_data, args.batch_size, True, args.seed)
     eval_train_loader = make_loader(train_data, args.batch_size, False, args.seed)
     eval_test_loader = make_loader(test_data, args.batch_size, False, args.seed)
 
     base_model = SmallMLP().to(device)
-    vanilla_model = SmallMLP().to(device)
-    controlled_model = SmallMLP().to(device)
-    vanilla_model.load_state_dict(base_model.state_dict())
-    controlled_model.load_state_dict(base_model.state_dict())
+    base_state = {
+        name: tensor.detach().clone()
+        for name, tensor in base_model.state_dict().items()
+    }
 
     criterion = nn.CrossEntropyLoss()
+    runs = []
+
+    vanilla_model = SmallMLP().to(device)
+    vanilla_model.load_state_dict(base_state)
     vanilla_metrics = train_vanilla_adam(
         vanilla_model,
-        train_loader_vanilla,
+        make_loader(train_data, args.batch_size, True, args.seed),
         eval_train_loader,
         eval_test_loader,
         criterion,
@@ -530,47 +642,140 @@ def main() -> None:
         args.epochs,
         args.lr,
     )
-    controlled_metrics, step_logs = train_controlled_adam(
-        controlled_model,
-        train_loader_controlled,
-        eval_train_loader,
-        eval_test_loader,
-        criterion,
-        device,
-        args.epochs,
-        args.lr,
-        args.controlled_kp,
-        args.controlled_rho_star,
-        args.controlled_rho_beta,
-        args.controlled_alpha_min,
-        args.controlled_alpha_max,
-        args.controlled_min_alpha_factor,
-        args.controlled_max_alpha_factor,
-    )
+    runs.append(OptimizerRun("vanilla_adam", vanilla_metrics))
+
+    if args.ablation:
+        runs.append(
+            run_controlled_variant(
+                "fixed_adam_direction",
+                base_state,
+                train_data,
+                eval_train_loader,
+                eval_test_loader,
+                criterion,
+                device,
+                args,
+                alpha0=args.lr,
+                kp=0.0,
+                rho_beta=0.0,
+                min_alpha_factor=1.0,
+                max_alpha_factor=1.0,
+                trust_region_expand=False,
+                use_rho_ema=False,
+                reject_bad_steps=False,
+                alpha_min=args.lr,
+                alpha_max=args.lr,
+            )
+        )
+        runs.append(
+            run_controlled_variant(
+                "controlled_raw_rho",
+                base_state,
+                train_data,
+                eval_train_loader,
+                eval_test_loader,
+                criterion,
+                device,
+                args,
+                alpha0=args.lr,
+                kp=args.controlled_kp,
+                rho_beta=0.0,
+                min_alpha_factor=args.controlled_min_alpha_factor,
+                max_alpha_factor=args.controlled_max_alpha_factor,
+                trust_region_expand=False,
+                use_rho_ema=False,
+                reject_bad_steps=True,
+            )
+        )
+        runs.append(
+            run_controlled_variant(
+                "controlled_ema",
+                base_state,
+                train_data,
+                eval_train_loader,
+                eval_test_loader,
+                criterion,
+                device,
+                args,
+                alpha0=args.lr,
+                kp=args.controlled_kp,
+                rho_beta=args.controlled_rho_beta,
+                min_alpha_factor=args.controlled_min_alpha_factor,
+                max_alpha_factor=args.controlled_max_alpha_factor,
+                trust_region_expand=False,
+                use_rho_ema=True,
+                reject_bad_steps=True,
+            )
+        )
+        runs.append(
+            run_controlled_variant(
+                "controlled_ema_trust",
+                base_state,
+                train_data,
+                eval_train_loader,
+                eval_test_loader,
+                criterion,
+                device,
+                args,
+                alpha0=args.lr,
+                kp=args.controlled_kp,
+                rho_beta=args.controlled_rho_beta,
+                min_alpha_factor=args.controlled_min_alpha_factor,
+                max_alpha_factor=args.controlled_max_alpha_factor,
+                trust_region_expand=args.controlled_trust_region_expand,
+                use_rho_ema=True,
+                reject_bad_steps=True,
+            )
+        )
+    else:
+        runs.append(
+            run_controlled_variant(
+                "controlled_adam",
+                base_state,
+                train_data,
+                eval_train_loader,
+                eval_test_loader,
+                criterion,
+                device,
+                args,
+                alpha0=args.lr,
+                kp=args.controlled_kp,
+                rho_beta=args.controlled_rho_beta,
+                min_alpha_factor=args.controlled_min_alpha_factor,
+                max_alpha_factor=args.controlled_max_alpha_factor,
+                trust_region_expand=args.controlled_trust_region_expand,
+                use_rho_ema=True,
+                reject_bad_steps=True,
+            )
+        )
 
     prefix = dataset_name
     save_epoch_metrics(
         output_dir / f"{prefix}_epoch_metrics.csv",
-        vanilla_metrics,
-        controlled_metrics,
+        runs,
     )
-    save_step_logs(output_dir / f"{prefix}_controlled_step_diagnostics.csv", step_logs)
-    plot_metrics(output_dir, dataset_name, vanilla_metrics, controlled_metrics, step_logs)
+    for run in runs:
+        if run.step_logs is None:
+            continue
+        diagnostics_name = (
+            f"{prefix}_controlled_step_diagnostics.csv"
+            if not args.ablation and run.name == "controlled_adam"
+            else f"{prefix}_{slugify(run.name)}_step_diagnostics.csv"
+        )
+        save_step_logs(
+            output_dir / diagnostics_name,
+            run.step_logs,
+            optimizer_name=run.name,
+        )
+    plot_metrics(output_dir, dataset_name, runs)
 
     print(f"Dataset: {dataset_name}")
     print(f"Outputs written to: {output_dir.resolve()}")
-    print(
-        "Vanilla Adam final test accuracy: "
-        f"{vanilla_metrics[-1].test_accuracy:.4f}"
-    )
-    print(
-        "Controlled Adam final test accuracy: "
-        f"{controlled_metrics[-1].test_accuracy:.4f}"
-    )
-    print(
-        "Controlled Adam accepted rate: "
-        f"{controlled_metrics[-1].accepted_rate:.4f}"
-    )
+    for run in runs:
+        final = run.metrics[-1]
+        print(f"{run.name} final test accuracy: {final.test_accuracy:.4f}")
+        if final.accepted_rate is not None:
+            print(f"{run.name} accepted rate: {final.accepted_rate:.4f}")
 
 
 if __name__ == "__main__":

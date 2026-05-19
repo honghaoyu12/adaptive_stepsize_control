@@ -109,6 +109,13 @@ and update `alpha_t` from `bar rho_t` instead of the raw per-minibatch `rho_t`.
 It also clips the multiplicative alpha update factor. This reduces the chance
 that one bad minibatch permanently collapses the global step size.
 
+The PyTorch controller also includes an optional trust-region style recovery
+rule. If a same-minibatch trial step is accepted without backtracking, the
+smoothed ratio is high, and `alpha_t` is already tiny, the controller forces a
+larger expansion factor for the next step. This treats "high rho at tiny alpha"
+as evidence that the current radius may be too conservative rather than as a
+reason to keep crawling upward slowly.
+
 Interpretation:
 
 - If `rho_t > rho_star`, the step performed well relative to the local model, so increase the global step size.
@@ -375,6 +382,34 @@ outputs/mnist/mnist_controlled_rho.png
 The controlled optimizer implementation lives in
 `src/controlled_adam/torch_optimizers.py` as `TorchControlledAdam`.
 
+To run an ablation that isolates which part of the controller matters, add
+`--ablation`:
+
+```bash
+python examples/run_mnist_demo.py \
+  --dataset fashion_mnist \
+  --fashion-folder ../fashion \
+  --epochs 20 \
+  --train-subset 4096 \
+  --test-subset 1024 \
+  --batch-size 128 \
+  --lr 1e-3 \
+  --ablation \
+  --output-dir outputs/fashion_mnist_20epochs_ablation
+```
+
+This trains all variants from the same initialization and minibatch order:
+
+- `vanilla_adam`: PyTorch Adam baseline.
+- `fixed_adam_direction`: the same Adam-style direction with fixed scalar
+  alpha and same-minibatch diagnostics, but no alpha control.
+- `controlled_raw_rho`: raw per-minibatch rho controller.
+- `controlled_ema`: EMA-smoothed rho controller.
+- `controlled_ema_trust`: EMA-smoothed rho plus trust-region recovery.
+
+The ablation writes one shared epoch CSV and one step-diagnostics CSV for each
+Adam-direction variant.
+
 ---
 
 ## 9. Run tests
@@ -420,6 +455,8 @@ The controlled Adam minibatch step is:
 9. Update the optional `rho` EMA.
 10. Accept or reject the trial step, then update `alpha_t` with a clipped
     multiplicative factor.
+11. If enabled, apply the trust-region recovery rule when an accepted,
+    non-backtracked step has high smoothed `rho` and tiny `alpha_t`.
 
 This requires one extra forward pass per minibatch, plus parameter rollback when
 a step is rejected. For a fair comparison with vanilla Adam, the MNIST
@@ -442,6 +479,10 @@ alpha_min = 1e-5
 alpha_max = 5e-2
 min_alpha_factor = 0.8
 max_alpha_factor = 1.05
+trust_region_expand = True
+trust_region_rho_threshold = 0.9
+trust_region_alpha_threshold = 1e-4
+trust_region_expand_factor = 1.5
 ```
 
 ### Interpreting rho when alpha is tiny
@@ -485,6 +526,14 @@ while learning may have stalled. Future controller variants should consider
 progress magnitude, alpha recovery rules, or treating tiny predicted/actual
 decreases as an uninformative ratio.
 
+The current PyTorch implementation uses a first recovery rule for this case:
+when `rho_ema >= trust_region_rho_threshold`, `alpha_t <=
+trust_region_alpha_threshold`, and the accepted trial step did not require
+backtracking, the next-alpha multiplier is at least
+`trust_region_expand_factor`. This mirrors classical trust-region logic:
+expand the radius only when the local model is reliable and the step appears to
+be limited by the current radius.
+
 ---
 
 ## 11. Practical notes
@@ -500,3 +549,6 @@ The implementation includes safeguards:
 - clip `alpha_t` between `alpha_min` and `alpha_max`.
 - optionally update `alpha_t` from an EMA-smoothed rho signal and clip the
   multiplicative alpha update factor.
+- optionally force trust-region expansion after high-quality tiny accepted
+  steps, and log `alpha_next`, `alpha_update_factor`, and
+  `trust_region_expanded` in minibatch diagnostics.

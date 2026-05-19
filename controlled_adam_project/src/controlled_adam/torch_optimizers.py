@@ -23,6 +23,9 @@ class ControlledAdamStep:
     descent_score: float
     backtracks: int
     rho_ema: float
+    alpha_next: float
+    alpha_update_factor: float
+    trust_region_expanded: bool
 
 
 class TorchControlledAdam:
@@ -53,6 +56,10 @@ class TorchControlledAdam:
         use_rho_ema: bool = True,
         min_alpha_factor: float = 0.8,
         max_alpha_factor: float = 1.05,
+        trust_region_expand: bool = True,
+        trust_region_rho_threshold: float = 0.9,
+        trust_region_alpha_threshold: float = 1e-4,
+        trust_region_expand_factor: float = 1.5,
     ) -> None:
         if alpha0 <= 0:
             raise ValueError("alpha0 must be positive.")
@@ -76,6 +83,12 @@ class TorchControlledAdam:
             raise ValueError("alpha update factors must be positive.")
         if min_alpha_factor > max_alpha_factor:
             raise ValueError("min_alpha_factor must be <= max_alpha_factor.")
+        if trust_region_rho_threshold < 0.0:
+            raise ValueError("trust_region_rho_threshold must be non-negative.")
+        if trust_region_alpha_threshold <= 0.0:
+            raise ValueError("trust_region_alpha_threshold must be positive.")
+        if trust_region_expand_factor <= 1.0:
+            raise ValueError("trust_region_expand_factor must be > 1.")
 
         self.params = [param for param in params if param.requires_grad]
         if not self.params:
@@ -98,6 +111,10 @@ class TorchControlledAdam:
         self.use_rho_ema = use_rho_ema
         self.min_alpha_factor = min_alpha_factor
         self.max_alpha_factor = max_alpha_factor
+        self.trust_region_expand = trust_region_expand
+        self.trust_region_rho_threshold = trust_region_rho_threshold
+        self.trust_region_alpha_threshold = trust_region_alpha_threshold
+        self.trust_region_expand_factor = trust_region_expand_factor
         self.rho_ema: float | None = None
         self.step_count = 0
         self.m = [torch.zeros_like(param) for param in self.params]
@@ -146,13 +163,15 @@ class TorchControlledAdam:
         loss_before_value = float(loss_before.detach().item())
 
         if descent_score <= 0.0:
-            self.alpha = float(
+            alpha_next = float(
                 np.clip(
                     self.alpha * self.non_descent_shrink,
                     self.alpha_min,
                     self.alpha_max,
                 )
             )
+            alpha_update_factor = alpha_next / alpha_used
+            self.alpha = alpha_next
             return ControlledAdamStep(
                 loss_before=loss_before_value,
                 loss_after=loss_before_value,
@@ -164,6 +183,9 @@ class TorchControlledAdam:
                 descent_score=descent_score,
                 backtracks=0,
                 rho_ema=float("nan") if self.rho_ema is None else self.rho_ema,
+                alpha_next=alpha_next,
+                alpha_update_factor=alpha_update_factor,
+                trust_region_expanded=False,
             )
 
         original_params = [param.detach().clone() for param in self.params]
@@ -186,7 +208,10 @@ class TorchControlledAdam:
             if (not self.reject_bad_steps) or (rho > self.rho_min):
                 alpha_used = trial_alpha
                 rho_control = self._update_rho_control(rho)
-                self.alpha = self._next_alpha_after_trial(alpha_used, rho_control)
+                alpha_next, alpha_update_factor, trust_region_expanded = (
+                    self._next_alpha_after_trial(alpha_used, rho_control, backtracks)
+                )
+                self.alpha = alpha_next
                 return ControlledAdamStep(
                     loss_before=loss_before_value,
                     loss_after=loss_after_value,
@@ -198,15 +223,20 @@ class TorchControlledAdam:
                     descent_score=descent_score,
                     backtracks=backtracks,
                     rho_ema=rho_control,
+                    alpha_next=alpha_next,
+                    alpha_update_factor=alpha_update_factor,
+                    trust_region_expanded=trust_region_expanded,
                 )
 
         self._restore_params(original_params)
         alpha_used = trial_alpha
         rho_control = self._update_rho_control(rho) if np.isfinite(rho) else self.rho_ema
-        self.alpha = self._next_alpha_after_trial(
+        alpha_next, alpha_update_factor, trust_region_expanded = self._next_alpha_after_trial(
             alpha_used,
             rho_control if rho_control is not None else self.rho_star - 1.0,
+            self.max_backtracks + 1,
         )
+        self.alpha = alpha_next
         return ControlledAdamStep(
             loss_before=loss_before_value,
             loss_after=loss_after_value,
@@ -218,6 +248,9 @@ class TorchControlledAdam:
             descent_score=descent_score,
             backtracks=self.max_backtracks,
             rho_ema=float("nan") if rho_control is None else rho_control,
+            alpha_next=alpha_next,
+            alpha_update_factor=alpha_update_factor,
+            trust_region_expanded=trust_region_expanded,
         )
 
     def _set_trial_params(
@@ -248,7 +281,23 @@ class TorchControlledAdam:
             self.rho_ema = self.rho_beta * self.rho_ema + (1.0 - self.rho_beta) * rho
         return self.rho_ema
 
-    def _next_alpha_after_trial(self, alpha_used: float, rho_control: float) -> float:
+    def _next_alpha_after_trial(
+        self,
+        alpha_used: float,
+        rho_control: float,
+        backtracks: int,
+    ) -> tuple[float, float, bool]:
         raw_factor = float(np.exp(self.kp * (rho_control - self.rho_star)))
         factor = float(np.clip(raw_factor, self.min_alpha_factor, self.max_alpha_factor))
-        return float(np.clip(alpha_used * factor, self.alpha_min, self.alpha_max))
+        trust_region_expanded = (
+            self.trust_region_expand
+            and backtracks == 0
+            and rho_control >= self.trust_region_rho_threshold
+            and alpha_used <= self.trust_region_alpha_threshold
+        )
+        if trust_region_expanded:
+            factor = max(factor, self.trust_region_expand_factor)
+
+        alpha_next = float(np.clip(alpha_used * factor, self.alpha_min, self.alpha_max))
+        alpha_update_factor = alpha_next / alpha_used
+        return alpha_next, alpha_update_factor, trust_region_expanded
