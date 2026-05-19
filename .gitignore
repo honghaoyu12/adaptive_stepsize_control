@@ -1,0 +1,23 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+.DS_Store
+
+# Generated plots and diagnostics
+outputs/
+controlled_adam_project/outputs/
+controlled_muon_project/outputs/
+
+# Local datasets
+data/
+mnist/
+fashion/
+*.arff
+controlled_adam_project/data/
+controlled_muon_project/data/
+
+# Local virtual environments
+controlled_adam_project/.venv/
+controlled_muon_project/.venv/
