@@ -489,6 +489,37 @@ def plot_metrics(output_dir: Path, dataset_name: str, runs: list[OptimizerRun]) 
 
     plt.figure(figsize=(7, 4))
     for run in runs:
+        plt.plot(epochs, [row.train_loss for row in run.metrics], label=run.name)
+    plt.xlabel("Epoch")
+    plt.ylabel("Train cross-entropy")
+    plt.title(f"{dataset_name} train loss")
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(output_dir / f"{dataset_name}_train_loss.png", dpi=160)
+    plt.close()
+
+    plt.figure(figsize=(8, 4.5))
+    for run in runs:
+        line = plt.plot(epochs, [row.test_loss for row in run.metrics], label=f"{run.name} test")[0]
+        plt.plot(
+            epochs,
+            [row.train_loss for row in run.metrics],
+            linestyle="--",
+            color=line.get_color(),
+            label=f"{run.name} train",
+        )
+    plt.xlabel("Epoch")
+    plt.ylabel("Cross-entropy")
+    plt.title(f"{dataset_name} train vs test loss")
+    plt.grid(True)
+    plt.legend(fontsize=8, ncol=2)
+    plt.tight_layout()
+    plt.savefig(output_dir / f"{dataset_name}_train_test_loss.png", dpi=160)
+    plt.close()
+
+    plt.figure(figsize=(7, 4))
+    for run in runs:
         plt.plot(epochs, [row.test_accuracy for row in run.metrics], label=run.name)
     plt.xlabel("Epoch")
     plt.ylabel("Test accuracy")

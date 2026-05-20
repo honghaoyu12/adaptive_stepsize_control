@@ -203,6 +203,15 @@ PYTHONPATH=src python examples/run_demo.py
 PYTHONPATH=src python examples/run_mnist_demo.py --dataset fashion_mnist --download --ablation
 ```
 
+The image benchmark runner supports long-run visibility with
+`--print-every N` and `--checkpoint-every N`. The latest larger CIFAR-10 Adam
+ablation used 20,000 train images and 5,000 test images for 40 epochs, with
+per-epoch checkpoints written under
+`controlled_adam_project/outputs/cifar10_20k_5k_40epochs_ablation_progress/`.
+On that run, final test accuracies were about `0.829` for vanilla Adam,
+`0.828` for fixed Adam-direction, and `0.828` for the EMA-controlled variants;
+the best peak was fixed Adam-direction at `0.840`.
+
 For minibatch training, the control ratio evaluates the trial loss on the
 **same minibatch** used to compute the gradient:
 
@@ -239,4 +248,4 @@ PYTHONPATH=src python examples/run_mnist_demo.py --dataset fashion_mnist --downl
 
 The current PyTorch Muon implementation is intentionally educational and uses
 CPU/NumPy orthogonalization, so CIFAR-10 runs are slower than the Adam runs.
-Add progress logging before running larger experiments.
+Add progress logging before running larger Muon experiments.

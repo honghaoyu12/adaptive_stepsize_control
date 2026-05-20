@@ -1243,3 +1243,118 @@ Potential next steps:
 - Tune controlled Adam hyperparameters for the MNIST experiment.
 - Consider sharing plotting style helpers between the root project and
   `controlled_adam_project` if the projects are later merged.
+
+---
+
+## 2026-05-20 Larger CIFAR-10 Adam Run With Progress Logging
+
+User asked for a larger CIFAR-10 test with more data and specifically wanted
+checkpoints plus periodic printed results because previous CIFAR/Muon runs were
+long and felt opaque.
+
+Implemented in:
+
+```text
+controlled_adam_project/examples/run_mnist_demo.py
+```
+
+Added:
+
+```text
+--print-every N
+--checkpoint-every N
+```
+
+Behavior:
+
+- `--print-every` prints compact per-epoch metrics for each optimizer variant.
+- `--checkpoint-every` writes per-epoch checkpoints under
+  `<output_dir>/checkpoints/`.
+- Checkpoints include model state, optimizer/controller state where available,
+  epoch number, dataset name, run name, and accumulated metrics.
+
+Verification before the long run:
+
+```text
+controlled_adam_project tests: 9 passed
+tiny CIFAR progress/checkpoint smoke run completed successfully
+```
+
+Larger CIFAR-10 command:
+
+```bash
+cd controlled_adam_project
+MPLCONFIGDIR=/private/tmp PYTHONPATH=src python examples/run_mnist_demo.py \
+  --dataset cifar10 \
+  --epochs 40 \
+  --train-subset 20000 \
+  --test-subset 5000 \
+  --batch-size 128 \
+  --lr 1e-3 \
+  --ablation \
+  --controlled-alpha-min 5e-4 \
+  --controlled-alpha-max 1.5e-3 \
+  --controlled-max-alpha-factor 1.05 \
+  --controlled-rho-star 0.6 \
+  --controlled-trust-alpha-threshold 1e-3 \
+  --controlled-trust-expand-factor 1.5 \
+  --checkpoint-every 1 \
+  --print-every 1 \
+  --output-dir outputs/cifar10_20k_5k_40epochs_ablation_progress
+```
+
+Output:
+
+```text
+controlled_adam_project/outputs/cifar10_20k_5k_40epochs_ablation_progress
+```
+
+Final test accuracy:
+
+```text
+vanilla_adam          0.8288
+fixed_adam_direction 0.8280
+controlled_raw_rho   0.8232
+controlled_ema       0.8278
+controlled_ema_trust 0.8278
+```
+
+Best test accuracy:
+
+```text
+vanilla_adam          0.8344 at epoch 38
+fixed_adam_direction 0.8402 at epoch 39
+controlled_raw_rho   0.8292 at epoch 38
+controlled_ema       0.8324 at epoch 37
+controlled_ema_trust 0.8324 at epoch 37
+```
+
+Important diagnostics:
+
+```text
+controlled_raw_rho:   final mean_alpha 1.5e-3, final mean_rho 0.8148, accepted 100%
+controlled_ema:       final mean_alpha 1.5e-3, final mean_rho 0.8166, accepted 100%
+controlled_ema_trust: final mean_alpha 1.5e-3, final mean_rho 0.8166, accepted 100%
+```
+
+Interpretation discussed:
+
+- The larger 20k/5k subset made CIFAR accuracy much more plausible than the
+  earlier 5k/1k runs. Vanilla Adam reached about 83% test accuracy rather than
+  the earlier low-70s.
+- The previous concern that vanilla Adam was "unreasonably low" was partly a
+  small-data and noisy-evaluation issue.
+- Fixed Adam-direction had the best peak result on this run: `0.8402`.
+- Controlled variants did not collapse. They accepted all steps and quickly
+  saturated the `1.5e-3` alpha cap.
+- Same-minibatch rho judged the larger steps as good, but validation accuracy
+  did not improve over fixed Adam-direction. This is an important caveat:
+  same-batch actual-vs-predicted progress can be locally valid while still not
+  optimizing generalization best.
+- `controlled_ema` and `controlled_ema_trust` were identical here, so this
+  setting did not meaningfully test trust-region behavior.
+- Next Adam CIFAR tuning ideas:
+  - try a lower alpha cap or slower schedule;
+  - add automatic best-epoch summaries;
+  - consider validation-aware best-checkpoint reporting;
+  - eventually run full CIFAR only with progress logging/checkpointing enabled.

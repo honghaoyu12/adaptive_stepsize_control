@@ -87,6 +87,11 @@ After that commit, additional documentation updates were made to:
 - `DEVELOPMENT_LOG.md`
 - `controlled_muon_project/README.md`
 
+After the documentation commit, the Adam CIFAR runner was updated with
+per-epoch progress printing and checkpointing, and a larger 20k/5k CIFAR-10
+ablation was run. Those changes may be uncommitted depending on when this
+handoff is read.
+
 There are also two user-provided/untracked comparison files at repo root:
 
 - `fashionmnist_20epoch_metrics.summary.csv`
@@ -261,6 +266,8 @@ MPLCONFIGDIR=/private/tmp PYTHONPATH=src python examples/run_mnist_demo.py \
   --controlled-rho-star 0.6 \
   --controlled-trust-alpha-threshold 1e-3 \
   --controlled-trust-expand-factor 1.5 \
+  --print-every 1 \
+  --checkpoint-every 1 \
   --output-dir outputs/cifar10_stronger_cnn_40epochs_ablation_alpha_cap_1p5e3
 ```
 
@@ -299,12 +306,17 @@ The runner writes:
 
 - `run_metadata.json`
 - `run_metadata.txt`
-- epoch metrics CSV
+- epoch metrics CSV with train loss, train accuracy, test loss, and test accuracy
 - step diagnostics CSVs
-- loss plot
+- test loss plot
+- train loss plot
+- train-vs-test loss plot
 - accuracy plot
 - controlled alpha plot
 - controlled rho plot
+- optional per-epoch checkpoints when `--checkpoint-every N` is set
+
+The Adam image runner also supports `--print-every N` for live epoch summaries.
 
 ### Important Adam Results
 
@@ -355,6 +367,65 @@ Interpretation:
 - `controlled_ema_trust` achieved the best final CIFAR result so far.
 - `controlled_raw_rho` achieved the best peak accuracy.
 - Trust expansion rarely fired in this CIFAR run; the benefit mostly came from keeping alpha bounded near a useful scale.
+
+Larger Adam CIFAR-10 run:
+
+Output:
+
+```text
+controlled_adam_project/outputs/cifar10_20k_5k_40epochs_ablation_progress
+```
+
+Command:
+
+```bash
+cd controlled_adam_project
+MPLCONFIGDIR=/private/tmp PYTHONPATH=src python examples/run_mnist_demo.py \
+  --dataset cifar10 \
+  --epochs 40 \
+  --train-subset 20000 \
+  --test-subset 5000 \
+  --batch-size 128 \
+  --lr 1e-3 \
+  --ablation \
+  --controlled-alpha-min 5e-4 \
+  --controlled-alpha-max 1.5e-3 \
+  --controlled-max-alpha-factor 1.05 \
+  --controlled-rho-star 0.6 \
+  --controlled-trust-alpha-threshold 1e-3 \
+  --controlled-trust-expand-factor 1.5 \
+  --checkpoint-every 1 \
+  --print-every 1 \
+  --output-dir outputs/cifar10_20k_5k_40epochs_ablation_progress
+```
+
+Final test accuracy:
+
+```text
+vanilla_adam          0.8288
+fixed_adam_direction 0.8280
+controlled_raw_rho   0.8232
+controlled_ema       0.8278
+controlled_ema_trust 0.8278
+```
+
+Best test accuracy:
+
+```text
+vanilla_adam          0.8344 at epoch 38
+fixed_adam_direction 0.8402 at epoch 39
+controlled_raw_rho   0.8292 at epoch 38
+controlled_ema       0.8324 at epoch 37
+controlled_ema_trust 0.8324 at epoch 37
+```
+
+Interpretation:
+
+- This 20k/5k result is the most informative Adam CIFAR result so far.
+- Larger-data CIFAR accuracy is much more plausible than the earlier 5000/1000 subset numbers.
+- Fixed Adam-direction had the best peak test accuracy.
+- Controlled variants all accepted 100% of steps and quickly saturated the `1.5e-3` alpha cap.
+- EMA and EMA-trust were identical in this run; trust-region behavior was not meaningfully distinguished.
 
 ## Controlled Muon Subproject
 
@@ -639,7 +710,7 @@ On another machine, either copy this folder or run the Adam/Muon runner with `--
    Do not change controlled Adam/Muon to evaluate `f(theta_{t+1})` on a fresh minibatch.
 
 2. CIFAR Muon is slow.
-   The current PyTorch Muon implementation orthogonalizes tensors through NumPy/CPU. It is acceptable for research demos but not efficient. Add progress logging before running more long jobs.
+   The current PyTorch Muon implementation orthogonalizes tensors through NumPy/CPU. It is acceptable for research demos but not efficient. Add progress logging before running more long Muon jobs.
 
 3. Muon dependency metadata was recently updated.
    `controlled_muon_project/pyproject.toml` and `requirements.txt` now include `torch`, `torchvision`, and `scikit-learn`.
@@ -651,14 +722,14 @@ On another machine, either copy this folder or run the Adam/Muon runner with `--
    Do not delete root `fashionmnist_20epoch_metrics.*` files or dataset folders unless the user explicitly asks.
 
 6. Current benchmark subset results are deterministic but subset-limited.
-   Accuracy numbers are for 4096/1024 Fashion-MNIST and 5000/1000 CIFAR-10 unless stated otherwise. They are not full-dataset claims.
+   Accuracy numbers are for 4096/1024 Fashion-MNIST and 5000/1000 CIFAR-10 unless stated otherwise. The larger Adam CIFAR run uses 20000/5000. These are not full-dataset claims.
 
 7. The Adam and Muon projects have similar but not identical control behavior.
    Adam needs a tight alpha cap around Adam scale for CIFAR; Muon naturally grew to much larger alpha values and still improved over fixed Muon in the subset runs.
 
 ## Recommended Next Steps For The Next Agent
 
-1. Add per-epoch progress printing and incremental CSV flushing to both `run_mnist_demo.py` scripts.
+1. Add per-epoch progress printing and incremental CSV flushing to the Muon `run_mnist_demo.py`. Adam now has per-epoch printing and checkpointing, but still does not flush epoch metrics incrementally during a run.
 
 2. Add automatic best-epoch summary CSV/JSON so users do not need ad hoc parsing.
 

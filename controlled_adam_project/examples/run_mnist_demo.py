@@ -10,6 +10,7 @@ import random
 import re
 import struct
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -118,6 +119,16 @@ class OptimizerRun:
     name: str
     metrics: list[EpochMetrics]
     step_logs: list[ControlledAdamStep] | None = None
+
+
+@dataclass
+class CheckpointConfig:
+    """Per-epoch checkpoint and progress reporting settings."""
+
+    output_dir: Path
+    dataset_name: str
+    save_every: int
+    print_every: int
 
 
 @dataclass
@@ -419,6 +430,69 @@ def evaluate(
     return total_loss / total, total_correct / total
 
 
+def format_epoch_metrics(
+    run_name: str,
+    row: EpochMetrics,
+    elapsed_seconds: float,
+) -> str:
+    """Return a compact one-line epoch progress report."""
+    message = (
+        f"[{run_name}] epoch {row.epoch}: "
+        f"train_loss={row.train_loss:.4f}, train_acc={row.train_accuracy:.4f}, "
+        f"test_loss={row.test_loss:.4f}, test_acc={row.test_accuracy:.4f}, "
+        f"elapsed={elapsed_seconds:.1f}s"
+    )
+    if row.mean_alpha is not None:
+        message += (
+            f", mean_alpha={row.mean_alpha:.3e}, "
+            f"mean_rho={row.mean_rho:.3f}, accepted={row.accepted_rate:.3f}"
+        )
+    return message
+
+
+def maybe_print_epoch(
+    run_name: str,
+    row: EpochMetrics,
+    elapsed_seconds: float,
+    checkpoint: CheckpointConfig | None,
+) -> None:
+    """Print progress on the configured cadence."""
+    if checkpoint is None or checkpoint.print_every <= 0:
+        return
+    if row.epoch == 1 or row.epoch % checkpoint.print_every == 0:
+        print(format_epoch_metrics(run_name, row, elapsed_seconds), flush=True)
+
+
+def maybe_save_checkpoint(
+    run_name: str,
+    model: nn.Module,
+    epoch: int,
+    metrics: list[EpochMetrics],
+    checkpoint: CheckpointConfig | None,
+    optimizer_state: dict[str, object] | None = None,
+) -> None:
+    """Save a lightweight checkpoint on the configured cadence."""
+    if checkpoint is None or checkpoint.save_every <= 0:
+        return
+    if epoch % checkpoint.save_every != 0:
+        return
+
+    checkpoint_dir = checkpoint.output_dir / "checkpoints"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    path = checkpoint_dir / f"{checkpoint.dataset_name}_{slugify(run_name)}_epoch_{epoch:04d}.pt"
+    payload: dict[str, object] = {
+        "run_name": run_name,
+        "dataset": checkpoint.dataset_name,
+        "epoch": epoch,
+        "model_state_dict": model.state_dict(),
+        "metrics": [row.__dict__ for row in metrics],
+    }
+    if optimizer_state is not None:
+        payload["optimizer_state"] = optimizer_state
+    torch.save(payload, path)
+    print(f"[{run_name}] checkpoint saved: {path}", flush=True)
+
+
 def train_vanilla_adam(
     model: nn.Module,
     train_loader: DataLoader,
@@ -429,12 +503,15 @@ def train_vanilla_adam(
     epochs: int,
     lr: float,
     seed: int,
+    run_name: str = "vanilla_adam",
+    checkpoint: CheckpointConfig | None = None,
 ) -> list[EpochMetrics]:
     """Train a model with PyTorch Adam."""
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     metrics = []
 
     for epoch in range(1, epochs + 1):
+        start_time = time.perf_counter()
         set_seed(seed + epoch)
         model.train()
         for x, y in train_loader:
@@ -449,6 +526,16 @@ def train_vanilla_adam(
         test_loss, test_accuracy = evaluate(model, test_loader, criterion, device)
         metrics.append(
             EpochMetrics(epoch, train_loss, train_accuracy, test_loss, test_accuracy)
+        )
+        elapsed = time.perf_counter() - start_time
+        maybe_print_epoch(run_name, metrics[-1], elapsed, checkpoint)
+        maybe_save_checkpoint(
+            run_name,
+            model,
+            epoch,
+            metrics,
+            checkpoint,
+            optimizer_state=optimizer.state_dict(),
         )
 
     return metrics
@@ -477,6 +564,8 @@ def train_controlled_adam(
     seed: int,
     use_rho_ema: bool = True,
     reject_bad_steps: bool = True,
+    run_name: str = "controlled_adam",
+    checkpoint: CheckpointConfig | None = None,
 ) -> tuple[list[EpochMetrics], list[ControlledAdamStep]]:
     """Train a model with same-minibatch controlled Adam."""
     optimizer = TorchControlledAdam(
@@ -501,6 +590,7 @@ def train_controlled_adam(
     step_logs = []
 
     for epoch in range(1, epochs + 1):
+        start_time = time.perf_counter()
         set_seed(seed + epoch)
         model.train()
         epoch_logs = []
@@ -534,6 +624,22 @@ def train_controlled_adam(
                 mean_rho=float(np.mean(finite_rhos)) if finite_rhos else float("nan"),
                 accepted_rate=float(np.mean([log.accepted for log in epoch_logs])),
             )
+        )
+        elapsed = time.perf_counter() - start_time
+        maybe_print_epoch(run_name, metrics[-1], elapsed, checkpoint)
+        maybe_save_checkpoint(
+            run_name,
+            model,
+            epoch,
+            metrics,
+            checkpoint,
+            optimizer_state={
+                "alpha": optimizer.alpha,
+                "rho_ema": optimizer.rho_ema,
+                "step_count": optimizer.step_count,
+                "m": optimizer.m,
+                "v": optimizer.v,
+            },
         )
 
     return metrics, step_logs
@@ -743,6 +849,8 @@ def save_run_metadata(
             "criterion": "CrossEntropyLoss",
             "eval_train_transform_is_deterministic": dataset_name == "cifar10",
             "epoch_seed_rule": "set_seed(seed + epoch) for each optimizer variant",
+            "checkpoint_every": args.checkpoint_every,
+            "print_every": args.print_every,
         },
         "optimizers": optimizer_variant_specs(args),
     }
@@ -781,6 +889,37 @@ def plot_metrics(
     plt.legend()
     plt.tight_layout()
     plt.savefig(output_dir / f"{dataset_name}_loss.png", dpi=160)
+    plt.close()
+
+    plt.figure(figsize=(7, 4))
+    for run in runs:
+        plt.plot(epochs, [row.train_loss for row in run.metrics], label=run.name)
+    plt.xlabel("Epoch")
+    plt.ylabel("Train cross-entropy")
+    plt.title(f"{dataset_name} train loss")
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(output_dir / f"{dataset_name}_train_loss.png", dpi=160)
+    plt.close()
+
+    plt.figure(figsize=(8, 4.5))
+    for run in runs:
+        line = plt.plot(epochs, [row.test_loss for row in run.metrics], label=f"{run.name} test")[0]
+        plt.plot(
+            epochs,
+            [row.train_loss for row in run.metrics],
+            linestyle="--",
+            color=line.get_color(),
+            label=f"{run.name} train",
+        )
+    plt.xlabel("Epoch")
+    plt.ylabel("Cross-entropy")
+    plt.title(f"{dataset_name} train vs test loss")
+    plt.grid(True)
+    plt.legend(fontsize=8, ncol=2)
+    plt.tight_layout()
+    plt.savefig(output_dir / f"{dataset_name}_train_test_loss.png", dpi=160)
     plt.close()
 
     plt.figure(figsize=(7, 4))
@@ -891,6 +1030,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--download", action="store_true")
     parser.add_argument("--device", default="cpu")
+    parser.add_argument(
+        "--checkpoint-every",
+        type=int,
+        default=0,
+        help="Save a model/optimizer checkpoint every N epochs. Use 0 to disable.",
+    )
+    parser.add_argument(
+        "--print-every",
+        type=int,
+        default=1,
+        help="Print epoch metrics every N epochs. Use 0 to disable progress output.",
+    )
     return parser.parse_args()
 
 
@@ -915,6 +1066,7 @@ def run_controlled_variant(
     reject_bad_steps: bool,
     alpha_min: float | None = None,
     alpha_max: float | None = None,
+    checkpoint: CheckpointConfig | None = None,
 ) -> OptimizerRun:
     """Train one Adam-direction variant from the shared initialization."""
     model = make_model(args.model, dataset_name).to(device)
@@ -943,6 +1095,8 @@ def run_controlled_variant(
         args.seed,
         use_rho_ema=use_rho_ema,
         reject_bad_steps=reject_bad_steps,
+        run_name=name,
+        checkpoint=checkpoint,
     )
     return OptimizerRun(name, metrics, step_logs)
 
@@ -967,6 +1121,12 @@ def main() -> None:
     eval_train_data = datasets.eval_train_data
     test_data = datasets.test_data
     dataset_name = datasets.name
+    checkpoint = CheckpointConfig(
+        output_dir=output_dir,
+        dataset_name=dataset_name,
+        save_every=args.checkpoint_every,
+        print_every=args.print_every,
+    )
     eval_train_loader = make_loader(eval_train_data, args.batch_size, False, args.seed)
     eval_test_loader = make_loader(test_data, args.batch_size, False, args.seed)
 
@@ -992,6 +1152,8 @@ def main() -> None:
         args.epochs,
         args.lr,
         args.seed,
+        run_name="vanilla_adam",
+        checkpoint=checkpoint,
     )
     runs.append(OptimizerRun("vanilla_adam", vanilla_metrics))
 
@@ -1017,6 +1179,7 @@ def main() -> None:
                 reject_bad_steps=False,
                 alpha_min=args.lr,
                 alpha_max=args.lr,
+                checkpoint=checkpoint,
             )
         )
         runs.append(
@@ -1038,6 +1201,7 @@ def main() -> None:
                 trust_region_expand=False,
                 use_rho_ema=False,
                 reject_bad_steps=True,
+                checkpoint=checkpoint,
             )
         )
         runs.append(
@@ -1059,6 +1223,7 @@ def main() -> None:
                 trust_region_expand=False,
                 use_rho_ema=True,
                 reject_bad_steps=True,
+                checkpoint=checkpoint,
             )
         )
         runs.append(
@@ -1080,6 +1245,7 @@ def main() -> None:
                 trust_region_expand=args.controlled_trust_region_expand,
                 use_rho_ema=True,
                 reject_bad_steps=True,
+                checkpoint=checkpoint,
             )
         )
     else:
@@ -1102,6 +1268,7 @@ def main() -> None:
                 trust_region_expand=args.controlled_trust_region_expand,
                 use_rho_ema=True,
                 reject_bad_steps=True,
+                checkpoint=checkpoint,
             )
         )
 

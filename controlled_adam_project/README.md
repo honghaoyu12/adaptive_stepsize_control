@@ -374,10 +374,16 @@ The MNIST experiment writes:
 outputs/mnist/mnist_epoch_metrics.csv
 outputs/mnist/mnist_controlled_step_diagnostics.csv
 outputs/mnist/mnist_loss.png
+outputs/mnist/mnist_train_loss.png
+outputs/mnist/mnist_train_test_loss.png
 outputs/mnist/mnist_accuracy.png
 outputs/mnist/mnist_controlled_alpha.png
 outputs/mnist/mnist_controlled_rho.png
 ```
+
+The epoch metrics CSV records both training and test loss. The default loss
+plot remains the test/validation loss plot, while `*_train_loss.png` and
+`*_train_test_loss.png` show the training-loss view explicitly.
 
 The controlled optimizer implementation lives in
 `src/controlled_adam/torch_optimizers.py` as `TorchControlledAdam`.
@@ -401,6 +407,8 @@ python examples/run_mnist_demo.py \
   --controlled-trust-expand-factor 2.5 \
   --controlled-max-alpha-factor 1.25 \
   --controlled-rho-star 0.5 \
+  --print-every 1 \
+  --checkpoint-every 1 \
   --output-dir outputs/cifar10_stronger_cnn_10epochs_ablation_tuned_cifar1
 ```
 
@@ -408,6 +416,8 @@ python examples/run_mnist_demo.py \
 If CIFAR-10 is already extracted under `data/`, `--download` is not required.
 For CIFAR-10, training uses random augmentation while train/test metrics use
 deterministic normalized evaluation transforms on the same subset indices.
+Use `--print-every N` for live epoch summaries and `--checkpoint-every N` to
+write per-epoch model/optimizer checkpoints under the output directory.
 
 Recent CIFAR-10 observations:
 
@@ -432,6 +442,17 @@ Recent CIFAR-10 observations:
   produced the best CIFAR final result so far on the 5000/1000 subset:
   `controlled_ema_trust` reached `0.731` final test accuracy, compared with
   `0.718` for vanilla Adam and `0.717` for fixed Adam-direction.
+- A larger 40-epoch CIFAR-10 run with 20,000 train images and 5,000 test images
+  was run with per-epoch printing and checkpoints:
+  `outputs/cifar10_20k_5k_40epochs_ablation_progress`. On the larger subset,
+  final test accuracies were `0.8288` for vanilla Adam, `0.8280` for fixed
+  Adam-direction, `0.8232` for raw-rho control, and `0.8278` for both EMA
+  control variants. Best test accuracies were `0.8344` for vanilla Adam,
+  `0.8402` for fixed Adam-direction, `0.8292` for raw-rho control, and
+  `0.8324` for both EMA variants.
+- In the larger 20k/5k run, all controlled variants accepted 100% of steps and
+  quickly saturated the `1.5e-3` alpha cap. The trust-region EMA variant matched
+  plain EMA, so this setting did not exercise a distinct trust-region behavior.
 - Each benchmark output directory now includes `run_metadata.json` and
   `run_metadata.txt` with the dataset, transforms, model architecture,
   trainable parameter count, optimizer variants, and controller hyperparameters.

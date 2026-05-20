@@ -167,6 +167,13 @@ Added metadata output:
 
 These include dataset, transforms, model architecture, parameter count, optimizer settings, seed, device, and training configuration.
 
+The neural benchmark epoch metrics CSV records both training and test loss.
+The plotting code now writes:
+
+- `*_loss.png` for test/validation loss
+- `*_train_loss.png` for training loss
+- `*_train_test_loss.png` for overlaid train/test loss
+
 Verification:
 
 ```bash
@@ -295,6 +302,90 @@ Interpretation:
 - Too-large alpha caps let controlled variants grow too aggressive.
 - `controlled_ema_trust` had the best final test accuracy in the strongest CIFAR run.
 - `controlled_raw_rho` had the best peak accuracy.
+
+Larger CIFAR-10 run with progress/checkpoints:
+
+Implemented per-epoch progress printing and checkpointing in
+`controlled_adam_project/examples/run_mnist_demo.py`.
+
+New flags:
+
+```text
+--print-every N
+--checkpoint-every N
+```
+
+Smoke validation:
+
+```text
+controlled_adam_project: 9 tests passed
+tiny CIFAR checkpoint/progress smoke run completed successfully
+```
+
+Larger run command:
+
+```bash
+cd controlled_adam_project
+MPLCONFIGDIR=/private/tmp PYTHONPATH=src python examples/run_mnist_demo.py \
+  --dataset cifar10 \
+  --epochs 40 \
+  --train-subset 20000 \
+  --test-subset 5000 \
+  --batch-size 128 \
+  --lr 1e-3 \
+  --ablation \
+  --controlled-alpha-min 5e-4 \
+  --controlled-alpha-max 1.5e-3 \
+  --controlled-max-alpha-factor 1.05 \
+  --controlled-rho-star 0.6 \
+  --controlled-trust-alpha-threshold 1e-3 \
+  --controlled-trust-expand-factor 1.5 \
+  --checkpoint-every 1 \
+  --print-every 1 \
+  --output-dir outputs/cifar10_20k_5k_40epochs_ablation_progress
+```
+
+Output:
+
+```text
+controlled_adam_project/outputs/cifar10_20k_5k_40epochs_ablation_progress
+```
+
+Final test accuracy:
+
+```text
+vanilla_adam          0.8288
+fixed_adam_direction 0.8280
+controlled_raw_rho   0.8232
+controlled_ema       0.8278
+controlled_ema_trust 0.8278
+```
+
+Best test accuracy:
+
+```text
+vanilla_adam          0.8344 at epoch 38
+fixed_adam_direction 0.8402 at epoch 39
+controlled_raw_rho   0.8292 at epoch 38
+controlled_ema       0.8324 at epoch 37
+controlled_ema_trust 0.8324 at epoch 37
+```
+
+Diagnostics:
+
+```text
+controlled_raw_rho:   final mean_alpha 1.5e-3, accepted 100%
+controlled_ema:       final mean_alpha 1.5e-3, accepted 100%
+controlled_ema_trust: final mean_alpha 1.5e-3, accepted 100%
+```
+
+Interpretation:
+
+- Larger-data CIFAR performance is much more plausible than the earlier 5000/1000 subset runs.
+- Fixed Adam-direction had the best peak test accuracy on this 20k/5k run.
+- The controlled variants quickly saturated the `1.5e-3` alpha cap and accepted all steps.
+- EMA and EMA-trust were identical in this setting, so trust-region expansion did not produce distinct behavior.
+- The next Adam CIFAR question is whether a lower cap, schedule, or validation-aware best-checkpoint reporting improves generalization.
 
 ## 6. Git Repository Setup
 
@@ -526,7 +617,7 @@ Document roles:
 
 ## 11. Recommended Next Engineering Steps
 
-1. Add per-epoch progress logging to both Adam and Muon image benchmark runners.
+1. Add per-epoch progress logging to the Muon image benchmark runner. Adam now has `--print-every` and `--checkpoint-every`.
 
 2. Flush epoch metrics incrementally so long runs produce visible progress and partial results.
 
