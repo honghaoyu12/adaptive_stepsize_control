@@ -1,4 +1,4 @@
-"""Compare vanilla Muon and controlled Muon on a matrix quadratic."""
+"""Compare vanilla Muon and controlled Muon on toy objectives."""
 
 from __future__ import annotations
 
@@ -6,87 +6,175 @@ from pathlib import Path
 
 import numpy as np
 
-from controlled_muon.objectives import MatrixQuadraticObjective
+from controlled_muon.objectives import (
+    Ackley,
+    AnisotropicQuadratic,
+    Beale,
+    Easom,
+    GoldsteinPrice,
+    Himmelblau,
+    Rastrigin,
+    Rosenbrock,
+    SixHumpCamel,
+)
 from controlled_muon.optimizers import MuonConfig, controlled_muon, vanilla_muon
 from controlled_muon.plotting import (
     plot_accepted_steps,
-    plot_controlled_step_size,
-    plot_distance_to_target,
-    plot_objective_values,
-    plot_rho_ratio,
+    plot_alpha,
+    plot_objective,
+    plot_rho,
+    plot_trajectory,
     save_controlled_diagnostics,
 )
 
 
-def main() -> None:
-    objective = MatrixQuadraticObjective.random_anisotropic(
-        shape=(12, 8),
-        seed=11,
-        curvature_min=0.2,
-        curvature_max=50.0,
-    )
-
-    W0 = np.zeros_like(objective.target)
-    steps = 160
-    rho_star = 0.7
-
-    # Use the Newton-Schulz polar iteration to keep the demo Muon-like.
-    config = MuonConfig(
-        momentum=0.90,
-        nesterov=True,
-        orthogonalizer="newton_schulz",
-        ns_steps=8,
-        update_scale=1.0,
-    )
-
-    vanilla = vanilla_muon(
-        objective=objective,
-        W0=W0,
-        eta=0.035,
-        steps=steps,
-        config=config,
-    )
-
+def run_one_objective(
+    objective,
+    x0: np.ndarray,
+    steps: int,
+    vanilla_alpha: float,
+    controlled_alpha0: float,
+    kp: float,
+    rho_star: float,
+    alpha_max: float,
+    output_dir: Path,
+) -> None:
+    config = MuonConfig(momentum=0.90, nesterov=True, orthogonalizer="newton_schulz", ns_steps=8, update_scale=1.0)
+    vanilla = vanilla_muon(objective=objective, W0=x0, eta=vanilla_alpha, steps=steps, config=config)
     controlled = controlled_muon(
         objective=objective,
-        W0=W0,
-        alpha0=0.08,
+        W0=x0,
+        alpha0=controlled_alpha0,
         steps=steps,
         config=config,
-        kp=0.45,
+        kp=kp,
         rho_star=rho_star,
         rho_min=0.0,
-        alpha_min=1e-6,
-        alpha_max=0.3,
-        descent_fail_shrink=0.25,
-        rollback_state_on_reject=True,
+        alpha_min=1e-8,
+        alpha_max=alpha_max,
+        reject_bad_steps=True,
     )
 
-    output_dir = Path(__file__).resolve().parents[1] / "outputs"
     paths = [
-        plot_objective_values(vanilla, controlled, output_dir),
-        plot_distance_to_target(vanilla, controlled, output_dir),
-        plot_controlled_step_size(controlled, output_dir),
-        plot_rho_ratio(controlled, rho_star, output_dir),
+        plot_objective(objective.name, vanilla, controlled, output_dir),
+        plot_alpha(objective.name, vanilla, controlled, output_dir),
+        plot_rho(objective.name, controlled, rho_star, output_dir),
+        plot_trajectory(objective, vanilla, controlled, output_dir),
         plot_accepted_steps(controlled, output_dir),
-        save_controlled_diagnostics(controlled, output_dir),
+        save_controlled_diagnostics(objective.name, controlled, output_dir),
     ]
 
-    print("Demo complete. Files written:")
+    print(f"\n{objective.name}")
+    print("-" * len(objective.name))
+    print(f"Vanilla Muon final x:      {vanilla.Ws[-1]}")
+    print(f"Vanilla Muon final f:      {vanilla.fs[-1]:.6e}")
+    print(f"Controlled Muon final x:   {controlled.Ws[-1]}")
+    print(f"Controlled Muon final f:   {controlled.fs[-1]:.6e}")
+    print(f"Controlled Muon final alpha: {controlled.step_sizes[-1]:.6e}")
+    print(f"Controlled Muon accepted steps: {int(controlled.accepted.sum())}/{len(controlled.accepted)}")
+    print("Files written:")
     for path in paths:
-        print(f"- {path}")
+        print(f"  - {path}")
 
-    print()
-    print("Vanilla Muon")
-    print(f"  final f: {vanilla.fs[-1]:.6e}")
-    print(f"  final distance to target: {vanilla.distances[-1]:.6e}")
 
-    print()
-    print("Controlled Muon")
-    print(f"  final f: {controlled.fs[-1]:.6e}")
-    print(f"  final distance to target: {controlled.distances[-1]:.6e}")
-    print(f"  final alpha: {controlled.step_sizes[-1]:.6e}")
-    print(f"  accepted steps: {controlled.accepted.sum()} / {len(controlled.accepted)}")
+def main() -> None:
+    output_dir = Path(__file__).resolve().parents[1] / "outputs"
+
+    cases = [
+        {
+            "objective": AnisotropicQuadratic(),
+            "x0": np.array([2.0, 2.0]),
+            "steps": 250,
+            "vanilla_alpha": 0.003,
+            "controlled_alpha0": 0.003,
+            "kp": 0.1,
+            "rho_star": 0.8,
+            "alpha_max": 0.5,
+        },
+        {
+            "objective": Rosenbrock(),
+            "x0": np.array([-1.5, 1.5]),
+            "steps": 3000,
+            "vanilla_alpha": 0.003,
+            "controlled_alpha0": 0.003,
+            "kp": 0.05,
+            "rho_star": 0.5,
+            "alpha_max": 0.05,
+        },
+        {
+            "objective": Himmelblau(),
+            "x0": np.array([-3.5, 0.5]),
+            "steps": 700,
+            "vanilla_alpha": 0.01,
+            "controlled_alpha0": 0.01,
+            "kp": 0.08,
+            "rho_star": 0.7,
+            "alpha_max": 0.08,
+        },
+        {
+            "objective": Rastrigin(),
+            "x0": np.array([3.3, 2.8]),
+            "steps": 900,
+            "vanilla_alpha": 0.004,
+            "controlled_alpha0": 0.004,
+            "kp": 0.04,
+            "rho_star": 0.5,
+            "alpha_max": 0.04,
+        },
+        {
+            "objective": Beale(),
+            "x0": np.array([1.0, 1.0]),
+            "steps": 1500,
+            "vanilla_alpha": 0.003,
+            "controlled_alpha0": 0.003,
+            "kp": 0.06,
+            "rho_star": 0.6,
+            "alpha_max": 0.08,
+        },
+        {
+            "objective": Ackley(),
+            "x0": np.array([2.5, 2.0]),
+            "steps": 1200,
+            "vanilla_alpha": 0.01,
+            "controlled_alpha0": 0.01,
+            "kp": 0.05,
+            "rho_star": 0.5,
+            "alpha_max": 0.08,
+        },
+        {
+            "objective": SixHumpCamel(),
+            "x0": np.array([1.2, -1.0]),
+            "steps": 800,
+            "vanilla_alpha": 0.01,
+            "controlled_alpha0": 0.01,
+            "kp": 0.06,
+            "rho_star": 0.6,
+            "alpha_max": 0.08,
+        },
+        {
+            "objective": GoldsteinPrice(),
+            "x0": np.array([0.5, -0.5]),
+            "steps": 1200,
+            "vanilla_alpha": 0.003,
+            "controlled_alpha0": 0.003,
+            "kp": 0.04,
+            "rho_star": 0.5,
+            "alpha_max": 0.04,
+        },
+        {
+            "objective": Easom(),
+            "x0": np.array([2.6, 3.6]),
+            "steps": 1000,
+            "vanilla_alpha": 0.01,
+            "controlled_alpha0": 0.01,
+            "kp": 0.05,
+            "rho_star": 0.5,
+            "alpha_max": 0.08,
+        },
+    ]
+
+    for case in cases:
+        run_one_objective(output_dir=output_dir, **case)
 
 
 if __name__ == "__main__":

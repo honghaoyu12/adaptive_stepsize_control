@@ -1,4 +1,4 @@
-"""Compare vanilla Adam and controlled Adam on small image classifiers."""
+"""Compare vanilla Muon and controlled Muon on image classification tasks."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Subset, TensorDataset
 
-from controlled_adam.torch_optimizers import ControlledAdamStep, TorchControlledAdam
+from controlled_muon.torch_optimizers import ControlledMuonStep, MuonConfig, TorchControlledMuon
 
 
 CIFAR10_MEAN = (0.4914, 0.4822, 0.4465)
@@ -27,8 +27,6 @@ CIFAR10_STD = (0.2470, 0.2435, 0.2616)
 
 
 class SmallMLP(nn.Module):
-    """Small fully connected classifier for 28x28 grayscale images."""
-
     def __init__(self) -> None:
         super().__init__()
         self.net = nn.Sequential(
@@ -43,8 +41,6 @@ class SmallMLP(nn.Module):
 
 
 class SmallCIFARCNN(nn.Module):
-    """Batch-normalized convolutional classifier for CIFAR-10 RGB images."""
-
     def __init__(self) -> None:
         super().__init__()
         self.features = nn.Sequential(
@@ -78,12 +74,41 @@ class SmallCIFARCNN(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.features(x)
-        return self.classifier(x)
+        return self.classifier(self.features(x))
+
+
+def _reshape_param_for_muon(param: torch.Tensor) -> tuple[torch.Tensor, tuple[int, ...]]:
+    shape = tuple(param.shape)
+    if param.ndim == 0:
+        raise ValueError("Muon parameters must have at least one dimension.")
+    if param.ndim == 1:
+        matrix = param.detach().clone().reshape(-1, 1)
+    elif param.ndim == 2:
+        matrix = param.detach().clone()
+    else:
+        matrix = param.detach().clone().reshape(param.shape[0], -1)
+    return matrix, shape
+
+
+def _direction_for_param(
+    grad: torch.Tensor,
+    momentum_buffer: torch.Tensor,
+    config: MuonConfig,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    new_momentum = config.momentum * momentum_buffer + grad
+    if config.nesterov:
+        matrix_to_orthogonalize = config.momentum * new_momentum + grad
+    else:
+        matrix_to_orthogonalize = new_momentum
+    matrix, shape = _reshape_param_for_muon(matrix_to_orthogonalize)
+    from controlled_muon.orthogonalization import orthogonalize
+
+    ortho_update = orthogonalize(matrix.cpu().numpy(), method=config.orthogonalizer, ns_steps=config.ns_steps)
+    direction = -config.update_scale * torch.from_numpy(ortho_update).to(device=grad.device, dtype=grad.dtype).reshape(shape)
+    return direction, new_momentum
 
 
 def make_model(model_name: str, dataset_name: str) -> nn.Module:
-    """Build a classifier compatible with the resolved dataset."""
     if model_name == "auto":
         model_name = "cnn" if dataset_name == "cifar10" else "mlp"
     if model_name == "mlp":
@@ -99,8 +124,6 @@ def make_model(model_name: str, dataset_name: str) -> nn.Module:
 
 @dataclass
 class EpochMetrics:
-    """Metrics collected after one training epoch."""
-
     epoch: int
     train_loss: float
     train_accuracy: float
@@ -113,17 +136,13 @@ class EpochMetrics:
 
 @dataclass
 class OptimizerRun:
-    """Metrics and optional step diagnostics for one optimizer variant."""
-
     name: str
     metrics: list[EpochMetrics]
-    step_logs: list[ControlledAdamStep] | None = None
+    step_logs: list[ControlledMuonStep] | None = None
 
 
 @dataclass
 class DatasetBundle:
-    """Train/eval datasets with shared deterministic subset indices."""
-
     train_data: torch.utils.data.Dataset
     eval_train_data: torch.utils.data.Dataset
     test_data: torch.utils.data.Dataset
@@ -137,33 +156,53 @@ class DatasetBundle:
 
 
 def set_seed(seed: int) -> None:
-    """Seed Python, NumPy, and PyTorch for repeatable comparisons."""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.use_deterministic_algorithms(True, warn_only=True)
 
 
-def load_image_dataset_or_digits(
-    data_dir: Path,
-    dataset: str,
-    train_subset: int,
-    test_subset: int,
-    seed: int,
-    allow_download: bool,
-    fashion_folder: Path | None,
-) -> tuple[torch.utils.data.Dataset, torch.utils.data.Dataset, str]:
-    """Load train/test datasets, falling back to sklearn digits."""
-    bundle = load_image_dataset_bundle(
-        data_dir,
-        dataset,
-        train_subset,
-        test_subset,
-        seed,
-        allow_download,
-        fashion_folder,
-    )
-    return bundle.train_data, bundle.test_data, bundle.name
+def deterministic_indices(length: int, size: int, seed: int) -> list[int] | None:
+    if size <= 0 or size >= length:
+        return None
+    generator = torch.Generator().manual_seed(seed)
+    return torch.randperm(length, generator=generator)[:size].tolist()
+
+
+def subset_from_indices(dataset, indices: list[int] | None):
+    if indices is None:
+        return dataset
+    return Subset(dataset, indices)
+
+
+def deterministic_subset(dataset, size: int, seed: int):
+    indices = deterministic_indices(len(dataset), size, seed)
+    return subset_from_indices(dataset, indices)
+
+
+def load_idx_image_dataset(folder: Path, train: bool) -> TensorDataset:
+    image_name = "train-images-idx3-ubyte.gz" if train else "t10k-images-idx3-ubyte.gz"
+    label_name = "train-labels-idx1-ubyte.gz" if train else "t10k-labels-idx1-ubyte.gz"
+    image_path = folder / image_name
+    label_path = folder / label_name
+    if not image_path.exists() or not label_path.exists():
+        raise FileNotFoundError(f"Missing IDX files in {folder}")
+    with gzip.open(image_path, "rb") as handle:
+        magic, count, rows, cols = struct.unpack(">IIII", handle.read(16))
+        if magic != 2051 or rows != 28 or cols != 28:
+            raise ValueError(f"Unexpected image IDX header in {image_path}")
+        image_data = handle.read()
+    with gzip.open(label_path, "rb") as handle:
+        magic, label_count = struct.unpack(">II", handle.read(8))
+        if magic != 2049:
+            raise ValueError(f"Unexpected label IDX header in {label_path}")
+        label_data = handle.read()
+    if count != label_count:
+        raise ValueError("Image and label counts do not match.")
+    images = torch.frombuffer(bytearray(image_data), dtype=torch.uint8)
+    images = images.reshape(count, 1, rows, cols).float() / 255.0
+    labels = torch.frombuffer(bytearray(label_data), dtype=torch.uint8).long()
+    return TensorDataset(images, labels)
 
 
 def load_image_dataset_bundle(
@@ -175,7 +214,6 @@ def load_image_dataset_bundle(
     allow_download: bool,
     fashion_folder: Path | None,
 ) -> DatasetBundle:
-    """Load train/eval/test datasets with deterministic subset alignment."""
     if dataset == "fashion_mnist" and fashion_folder is not None:
         train = load_idx_image_dataset(fashion_folder, train=True)
         test = load_idx_image_dataset(fashion_folder, train=False)
@@ -212,24 +250,9 @@ def load_image_dataset_bundle(
                     transforms.Normalize(CIFAR10_MEAN, CIFAR10_STD),
                 ]
             )
-            train = datasets.CIFAR10(
-                root=data_dir,
-                train=True,
-                download=allow_download,
-                transform=train_transform,
-            )
-            eval_train = datasets.CIFAR10(
-                root=data_dir,
-                train=True,
-                download=False,
-                transform=eval_transform,
-            )
-            test = datasets.CIFAR10(
-                root=data_dir,
-                train=False,
-                download=allow_download,
-                transform=eval_transform,
-            )
+            train = datasets.CIFAR10(root=data_dir, train=True, download=allow_download, transform=train_transform)
+            eval_train = datasets.CIFAR10(root=data_dir, train=True, download=False, transform=eval_transform)
+            test = datasets.CIFAR10(root=data_dir, train=False, download=allow_download, transform=eval_transform)
             train_indices = deterministic_indices(len(train), train_subset, seed)
             test_indices = deterministic_indices(len(test), test_subset, seed + 1)
             train_data = subset_from_indices(train, train_indices)
@@ -240,13 +263,8 @@ def load_image_dataset_bundle(
                 eval_train_data=eval_train_data,
                 test_data=test_data,
                 name=dataset,
-                train_transform=(
-                    "RandomCrop(32, padding=4) -> RandomHorizontalFlip() -> "
-                    f"ToTensor() -> Normalize(mean={CIFAR10_MEAN}, std={CIFAR10_STD})"
-                ),
-                eval_transform=(
-                    f"ToTensor() -> Normalize(mean={CIFAR10_MEAN}, std={CIFAR10_STD})"
-                ),
+                train_transform="RandomCrop(32,padding=4) -> RandomHorizontalFlip() -> ToTensor() -> Normalize",
+                eval_transform="ToTensor() -> Normalize",
                 train_size_full=len(train),
                 test_size_full=len(test),
                 train_size_used=len(train_data),
@@ -254,22 +272,9 @@ def load_image_dataset_bundle(
             )
 
         transform = transforms.ToTensor()
-        dataset_cls = {
-            "mnist": datasets.MNIST,
-            "fashion_mnist": datasets.FashionMNIST,
-        }[dataset]
-        train = dataset_cls(
-            root=data_dir,
-            train=True,
-            download=allow_download,
-            transform=transform,
-        )
-        test = dataset_cls(
-            root=data_dir,
-            train=False,
-            download=allow_download,
-            transform=transform,
-        )
+        dataset_cls = {"mnist": datasets.MNIST, "fashion_mnist": datasets.FashionMNIST}[dataset]
+        train = dataset_cls(root=data_dir, train=True, download=allow_download, transform=transform)
+        test = dataset_cls(root=data_dir, train=False, download=allow_download, transform=transform)
         train = deterministic_subset(train, train_subset, seed)
         test = deterministic_subset(test, test_subset, seed + 1)
         return DatasetBundle(
@@ -287,26 +292,16 @@ def load_image_dataset_bundle(
     except Exception as exc:
         if dataset == "cifar10":
             raise RuntimeError(
-                "Could not load CIFAR-10. Re-run with --download or place the "
-                "torchvision CIFAR-10 files under the selected --data-dir."
+                "Could not load CIFAR-10. Re-run with --download or place the torchvision CIFAR-10 files under --data-dir."
             ) from exc
-
         try:
             from sklearn.datasets import load_digits
         except Exception as sklearn_exc:
-            raise RuntimeError(
-                f"Could not load {dataset} and sklearn digits fallback is unavailable."
-            ) from sklearn_exc
-
+            raise RuntimeError(f"Could not load {dataset} and sklearn digits fallback is unavailable.") from sklearn_exc
         print(f"{dataset} unavailable ({exc}). Falling back to sklearn digits.")
         digits = load_digits()
         images = torch.tensor(digits.images, dtype=torch.float32).unsqueeze(1) / 16.0
-        images = torch.nn.functional.interpolate(
-            images,
-            size=(28, 28),
-            mode="bilinear",
-            align_corners=False,
-        )
+        images = torch.nn.functional.interpolate(images, size=(28, 28), mode="bilinear", align_corners=False)
         labels = torch.tensor(digits.target, dtype=torch.long)
         generator = torch.Generator().manual_seed(seed)
         indices = torch.randperm(len(labels), generator=generator)
@@ -329,79 +324,12 @@ def load_image_dataset_bundle(
         )
 
 
-def load_idx_image_dataset(folder: Path, train: bool) -> TensorDataset:
-    """Load Fashion-MNIST style IDX gzip files from a flat folder."""
-    image_name = "train-images-idx3-ubyte.gz" if train else "t10k-images-idx3-ubyte.gz"
-    label_name = "train-labels-idx1-ubyte.gz" if train else "t10k-labels-idx1-ubyte.gz"
-    image_path = folder / image_name
-    label_path = folder / label_name
-    if not image_path.exists() or not label_path.exists():
-        raise FileNotFoundError(f"Missing IDX files in {folder}")
-
-    with gzip.open(image_path, "rb") as handle:
-        magic, count, rows, cols = struct.unpack(">IIII", handle.read(16))
-        if magic != 2051 or rows != 28 or cols != 28:
-            raise ValueError(f"Unexpected image IDX header in {image_path}")
-        image_data = handle.read()
-    with gzip.open(label_path, "rb") as handle:
-        magic, label_count = struct.unpack(">II", handle.read(8))
-        if magic != 2049:
-            raise ValueError(f"Unexpected label IDX header in {label_path}")
-        label_data = handle.read()
-    if count != label_count:
-        raise ValueError("Image and label counts do not match.")
-
-    images = torch.frombuffer(bytearray(image_data), dtype=torch.uint8)
-    images = images.reshape(count, 1, rows, cols).float() / 255.0
-    labels = torch.frombuffer(bytearray(label_data), dtype=torch.uint8).long()
-    return TensorDataset(images, labels)
-
-
-def deterministic_subset(dataset, size: int, seed: int):
-    """Return a deterministic subset, or the original dataset if size <= 0."""
-    indices = deterministic_indices(len(dataset), size, seed)
-    return subset_from_indices(dataset, indices)
-
-
-def deterministic_indices(length: int, size: int, seed: int) -> list[int] | None:
-    """Return deterministic subset indices, or None to keep the full dataset."""
-    if size <= 0 or size >= length:
-        return None
+def make_loader(dataset, batch_size: int, shuffle: bool, seed: int) -> DataLoader:
     generator = torch.Generator().manual_seed(seed)
-    return torch.randperm(length, generator=generator)[:size].tolist()
+    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, generator=generator, num_workers=0)
 
 
-def subset_from_indices(dataset, indices: list[int] | None):
-    """Apply optional subset indices to a dataset."""
-    if indices is None:
-        return dataset
-    return Subset(dataset, indices)
-
-
-def make_loader(
-    dataset,
-    batch_size: int,
-    shuffle: bool,
-    seed: int,
-) -> DataLoader:
-    """Build a deterministic dataloader."""
-    generator = torch.Generator().manual_seed(seed)
-    return DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        generator=generator,
-        num_workers=0,
-    )
-
-
-def evaluate(
-    model: nn.Module,
-    loader: DataLoader,
-    criterion: nn.Module,
-    device: torch.device,
-) -> tuple[float, float]:
-    """Return average loss and accuracy."""
+def evaluate(model: nn.Module, loader: DataLoader, criterion: nn.Module, device: torch.device) -> tuple[float, float]:
     model.eval()
     total_loss = 0.0
     total_correct = 0
@@ -419,7 +347,7 @@ def evaluate(
     return total_loss / total, total_correct / total
 
 
-def train_vanilla_adam(
+def train_vanilla_muon(
     model: nn.Module,
     train_loader: DataLoader,
     eval_train_loader: DataLoader,
@@ -429,32 +357,39 @@ def train_vanilla_adam(
     epochs: int,
     lr: float,
     seed: int,
+    config: MuonConfig,
 ) -> list[EpochMetrics]:
-    """Train a model with PyTorch Adam."""
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     metrics = []
-
+    config = config
+    momentum_buffers = [torch.zeros_like(param) for param in model.parameters() if param.requires_grad]
     for epoch in range(1, epochs + 1):
         set_seed(seed + epoch)
         model.train()
+        mb_index = 0
         for x, y in train_loader:
             x = x.to(device)
             y = y.to(device)
-            optimizer.zero_grad(set_to_none=True)
+            for param in model.parameters():
+                if param.grad is not None:
+                    param.grad = None
             loss = criterion(model(x), y)
             loss.backward()
-            optimizer.step()
-
+            with torch.no_grad():
+                muon_params = [param for param in model.parameters() if param.requires_grad]
+                for idx, param in enumerate(muon_params):
+                    if param.grad is None:
+                        continue
+                    direction, new_momentum = _direction_for_param(param.grad.detach(), momentum_buffers[idx], config)
+                    momentum_buffers[idx] = new_momentum
+                    param.add_(direction, alpha=lr)
+                    mb_index += 1
         train_loss, train_accuracy = evaluate(model, eval_train_loader, criterion, device)
         test_loss, test_accuracy = evaluate(model, test_loader, criterion, device)
-        metrics.append(
-            EpochMetrics(epoch, train_loss, train_accuracy, test_loss, test_accuracy)
-        )
-
+        metrics.append(EpochMetrics(epoch, train_loss, train_accuracy, test_loss, test_accuracy))
     return metrics
 
 
-def train_controlled_adam(
+def train_controlled_muon(
     model: nn.Module,
     train_loader: DataLoader,
     eval_train_loader: DataLoader,
@@ -477,11 +412,11 @@ def train_controlled_adam(
     seed: int,
     use_rho_ema: bool = True,
     reject_bad_steps: bool = True,
-) -> tuple[list[EpochMetrics], list[ControlledAdamStep]]:
-    """Train a model with same-minibatch controlled Adam."""
-    optimizer = TorchControlledAdam(
+) -> tuple[list[EpochMetrics], list[ControlledMuonStep]]:
+    optimizer = TorchControlledMuon(
         model.parameters(),
         alpha0=alpha0,
+        config=MuonConfig(),
         kp=kp,
         rho_star=rho_star,
         alpha_min=alpha_min,
@@ -499,16 +434,13 @@ def train_controlled_adam(
     )
     metrics = []
     step_logs = []
-
     for epoch in range(1, epochs + 1):
         set_seed(seed + epoch)
         model.train()
         epoch_logs = []
-
         for x, y in train_loader:
             x = x.to(device)
             y = y.to(device)
-
             optimizer.zero_grad()
             loss_before = criterion(model(x), y)
             loss_before.backward()
@@ -519,7 +451,6 @@ def train_controlled_adam(
             step_log = optimizer.step(loss_before, same_batch_loss)
             step_logs.append(step_log)
             epoch_logs.append(step_log)
-
         train_loss, train_accuracy = evaluate(model, eval_train_loader, criterion, device)
         test_loss, test_accuracy = evaluate(model, test_loader, criterion, device)
         finite_rhos = [log.rho for log in epoch_logs if np.isfinite(log.rho)]
@@ -535,53 +466,75 @@ def train_controlled_adam(
                 accepted_rate=float(np.mean([log.accepted for log in epoch_logs])),
             )
         )
-
     return metrics, step_logs
 
 
-def save_epoch_metrics(
-    path: Path,
-    runs: list[OptimizerRun],
-) -> None:
-    """Save epoch-level metrics as CSV."""
+def slugify(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+
+
+def plot_metrics(output_dir: Path, dataset_name: str, runs: list[OptimizerRun]) -> None:
+    epochs = [row.epoch for row in runs[0].metrics]
+    plt.figure(figsize=(7, 4))
+    for run in runs:
+        plt.plot(epochs, [row.test_loss for row in run.metrics], label=run.name)
+    plt.xlabel("Epoch")
+    plt.ylabel("Test cross-entropy")
+    plt.title(f"{dataset_name} test loss")
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(output_dir / f"{dataset_name}_loss.png", dpi=160)
+    plt.close()
+
+    plt.figure(figsize=(7, 4))
+    for run in runs:
+        plt.plot(epochs, [row.test_accuracy for row in run.metrics], label=run.name)
+    plt.xlabel("Epoch")
+    plt.ylabel("Test accuracy")
+    plt.title(f"{dataset_name} test accuracy")
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(output_dir / f"{dataset_name}_accuracy.png", dpi=160)
+    plt.close()
+
+    runs_with_steps = [run for run in runs if run.step_logs]
+    if runs_with_steps:
+        plt.figure(figsize=(7, 4))
+        for run in runs_with_steps:
+            assert run.step_logs is not None
+            plt.plot([log.alpha for log in run.step_logs], label=run.name)
+        plt.xlabel("Minibatch step")
+        plt.ylabel("alpha")
+        plt.title("Muon global step size")
+        plt.grid(True)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(output_dir / f"{dataset_name}_controlled_alpha.png", dpi=160)
+        plt.close()
+
+
+def save_epoch_metrics(path: Path, runs: list[OptimizerRun]) -> None:
     with path.open("w", newline="") as handle:
         writer = csv.writer(handle)
-        writer.writerow(
-            [
-                "optimizer",
-                "epoch",
-                "train_loss",
-                "train_accuracy",
-                "test_loss",
-                "test_accuracy",
-                "mean_alpha",
-                "mean_rho",
-                "accepted_rate",
-            ]
-        )
+        writer.writerow(["optimizer", "epoch", "train_loss", "train_accuracy", "test_loss", "test_accuracy", "mean_alpha", "mean_rho", "accepted_rate"])
         for run in runs:
             for row in run.metrics:
-                writer.writerow(
-                    [
-                        run.name,
-                        row.epoch,
-                        row.train_loss,
-                        row.train_accuracy,
-                        row.test_loss,
-                        row.test_accuracy,
-                        "" if row.mean_alpha is None else row.mean_alpha,
-                        "" if row.mean_rho is None else row.mean_rho,
-                        "" if row.accepted_rate is None else row.accepted_rate,
-                    ]
-            )
+                writer.writerow([
+                    run.name,
+                    row.epoch,
+                    row.train_loss,
+                    row.train_accuracy,
+                    row.test_loss,
+                    row.test_accuracy,
+                    "" if row.mean_alpha is None else row.mean_alpha,
+                    "" if row.mean_rho is None else row.mean_rho,
+                    "" if row.accepted_rate is None else row.accepted_rate,
+                ])
 
 
-def save_step_logs(
-    path: Path,
-    step_logs: list[ControlledAdamStep],
-    optimizer_name: str | None = None,
-) -> None:
-    """Save controlled Adam step diagnostics as CSV."""
+def save_step_logs(path: Path, step_logs: list[ControlledMuonStep], optimizer_name: str | None = None) -> None:
     with path.open("w", newline="") as handle:
         writer = csv.writer(handle)
         header = [
@@ -626,21 +579,20 @@ def save_step_logs(
 
 
 def count_parameters(model: nn.Module) -> int:
-    """Return the number of trainable parameters."""
     return sum(param.numel() for param in model.parameters() if param.requires_grad)
 
 
 def optimizer_variant_specs(args: argparse.Namespace) -> list[dict[str, object]]:
-    """Describe optimizer variants used by this run."""
-    variants: list[dict[str, object]] = [
+    variants = [
         {
-            "name": "vanilla_adam",
-            "type": "torch.optim.Adam",
+            "name": "vanilla_muon",
+            "type": "fixed-step Muon implemented in this runner",
             "learning_rate": args.lr,
+            "direction": "Muon-like matrix orthogonalization",
         }
     ]
     controlled_common = {
-        "direction": "Adam moments with same-minibatch actual/predicted controller",
+        "direction": "Muon orthogonalized direction with same-minibatch actual/predicted controller",
         "alpha0": args.lr,
         "kp": args.controlled_kp,
         "rho_star": args.controlled_rho_star,
@@ -656,58 +608,26 @@ def optimizer_variant_specs(args: argparse.Namespace) -> list[dict[str, object]]
         "max_backtracks": 3,
         "same_minibatch_trial_loss": True,
     }
-
     if args.ablation:
         variants.extend(
             [
                 {
-                    "name": "fixed_adam_direction",
-                    "type": "TorchControlledAdam direction with fixed alpha",
+                    "name": "fixed_muon_direction",
+                    "type": "TorchControlledMuon direction with fixed alpha",
                     "alpha": args.lr,
                     "reject_bad_steps": False,
                 },
-                {
-                    **controlled_common,
-                    "name": "controlled_raw_rho",
-                    "use_rho_ema": False,
-                    "trust_region_expand": False,
-                    "reject_bad_steps": True,
-                },
-                {
-                    **controlled_common,
-                    "name": "controlled_ema",
-                    "use_rho_ema": True,
-                    "trust_region_expand": False,
-                    "reject_bad_steps": True,
-                },
-                {
-                    **controlled_common,
-                    "name": "controlled_ema_trust",
-                    "use_rho_ema": True,
-                    "reject_bad_steps": True,
-                },
+                {**controlled_common, "name": "controlled_raw_rho", "use_rho_ema": False, "trust_region_expand": False, "reject_bad_steps": True},
+                {**controlled_common, "name": "controlled_ema", "use_rho_ema": True, "trust_region_expand": False, "reject_bad_steps": True},
+                {**controlled_common, "name": "controlled_ema_trust", "use_rho_ema": True, "reject_bad_steps": True},
             ]
         )
     else:
-        variants.append(
-            {
-                **controlled_common,
-                "name": "controlled_adam",
-                "use_rho_ema": True,
-                "reject_bad_steps": True,
-            }
-        )
+        variants.append({**controlled_common, "name": "controlled_muon", "use_rho_ema": True, "reject_bad_steps": True})
     return variants
 
 
-def save_run_metadata(
-    output_dir: Path,
-    args: argparse.Namespace,
-    dataset_bundle: DatasetBundle,
-    model: nn.Module,
-    dataset_name: str,
-) -> None:
-    """Write detailed benchmark metadata to JSON and text files."""
+def save_run_metadata(output_dir: Path, args: argparse.Namespace, dataset_bundle: DatasetBundle, model: nn.Module, dataset_name: str) -> None:
     resolved_model = "cnn" if dataset_name == "cifar10" and args.model == "auto" else args.model
     if resolved_model == "auto":
         resolved_model = "mlp"
@@ -746,115 +666,14 @@ def save_run_metadata(
         },
         "optimizers": optimizer_variant_specs(args),
     }
-
-    json_path = output_dir / "run_metadata.json"
-    txt_path = output_dir / "run_metadata.txt"
-    with json_path.open("w") as handle:
-        json.dump(metadata, handle, indent=2)
-    with txt_path.open("w") as handle:
-        handle.write("Benchmark metadata\n")
-        handle.write("==================\n\n")
-        handle.write(json.dumps(metadata, indent=2))
-        handle.write("\n")
-
-
-def slugify(name: str) -> str:
-    """Return a filesystem-friendly optimizer name."""
-    return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
-
-
-def plot_metrics(
-    output_dir: Path,
-    dataset_name: str,
-    runs: list[OptimizerRun],
-) -> None:
-    """Save comparison plots."""
-    epochs = [row.epoch for row in runs[0].metrics]
-
-    plt.figure(figsize=(7, 4))
-    for run in runs:
-        plt.plot(epochs, [row.test_loss for row in run.metrics], label=run.name)
-    plt.xlabel("Epoch")
-    plt.ylabel("Test cross-entropy")
-    plt.title(f"{dataset_name} test loss")
-    plt.grid(True)
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(output_dir / f"{dataset_name}_loss.png", dpi=160)
-    plt.close()
-
-    plt.figure(figsize=(7, 4))
-    for run in runs:
-        plt.plot(epochs, [row.test_accuracy for row in run.metrics], label=run.name)
-    plt.xlabel("Epoch")
-    plt.ylabel("Test accuracy")
-    plt.title(f"{dataset_name} test accuracy")
-    plt.grid(True)
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(output_dir / f"{dataset_name}_accuracy.png", dpi=160)
-    plt.close()
-
-    runs_with_steps = [run for run in runs if run.step_logs]
-    if runs_with_steps:
-        plt.figure(figsize=(7, 4))
-        for run in runs_with_steps:
-            assert run.step_logs is not None
-            plt.plot([log.alpha for log in run.step_logs], label=run.name)
-            expanded_steps = [
-                (i, log.alpha)
-                for i, log in enumerate(run.step_logs)
-                if log.trust_region_expanded
-            ]
-            if expanded_steps:
-                plt.scatter(
-                    [i for i, _ in expanded_steps],
-                    [alpha for _, alpha in expanded_steps],
-                    s=12,
-                    zorder=3,
-                )
-        plt.xlabel("Minibatch step")
-        plt.ylabel("alpha")
-        plt.title("Adam-direction global step size")
-        plt.grid(True)
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(output_dir / f"{dataset_name}_controlled_alpha.png", dpi=160)
-        plt.close()
-
-        plt.figure(figsize=(7, 4))
-        for run in runs_with_steps:
-            assert run.step_logs is not None
-            finite = [
-                (i, log.rho_ema)
-                for i, log in enumerate(run.step_logs)
-                if np.isfinite(log.rho_ema)
-            ]
-            if finite:
-                plt.plot([i for i, _ in finite], [rho for _, rho in finite], label=run.name)
-        plt.xlabel("Minibatch step")
-        plt.ylabel("rho control signal")
-        plt.title("Same-minibatch rho control signal")
-        plt.grid(True)
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(output_dir / f"{dataset_name}_controlled_rho.png", dpi=160)
-        plt.close()
+    (output_dir / "run_metadata.json").write_text(json.dumps(metadata, indent=2))
+    (output_dir / "run_metadata.txt").write_text("Benchmark metadata\n==================\n\n" + json.dumps(metadata, indent=2) + "\n")
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--dataset",
-        choices=["mnist", "fashion_mnist", "cifar10"],
-        default="fashion_mnist",
-    )
-    parser.add_argument(
-        "--model",
-        choices=["auto", "mlp", "cnn"],
-        default="auto",
-        help="Classifier architecture. Auto uses CNN for CIFAR-10 and MLP otherwise.",
-    )
+    parser.add_argument("--dataset", choices=["mnist", "fashion_mnist", "cifar10"], default="fashion_mnist")
+    parser.add_argument("--model", choices=["auto", "mlp", "cnn"], default="auto")
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--train-subset", type=int, default=4096)
@@ -868,26 +687,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--controlled-alpha-max", type=float, default=5e-2)
     parser.add_argument("--controlled-min-alpha-factor", type=float, default=0.8)
     parser.add_argument("--controlled-max-alpha-factor", type=float, default=1.05)
-    parser.add_argument(
-        "--controlled-trust-region-expand",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-    )
+    parser.add_argument("--controlled-trust-region-expand", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--controlled-trust-rho-threshold", type=float, default=0.9)
     parser.add_argument("--controlled-trust-alpha-threshold", type=float, default=1e-4)
     parser.add_argument("--controlled-trust-expand-factor", type=float, default=1.5)
-    parser.add_argument(
-        "--ablation",
-        action="store_true",
-        help="Run Adam-direction ablations instead of only vanilla vs controlled.",
-    )
+    parser.add_argument("--ablation", action="store_true")
     parser.add_argument("--data-dir", type=Path, default=Path("data"))
-    parser.add_argument(
-        "--fashion-folder",
-        type=Path,
-        default=None,
-        help="Flat folder containing Fashion-MNIST IDX gzip files.",
-    )
+    parser.add_argument("--fashion-folder", type=Path, default=None)
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--download", action="store_true")
     parser.add_argument("--device", default="cpu")
@@ -916,11 +722,10 @@ def run_controlled_variant(
     alpha_min: float | None = None,
     alpha_max: float | None = None,
 ) -> OptimizerRun:
-    """Train one Adam-direction variant from the shared initialization."""
     model = make_model(args.model, dataset_name).to(device)
     model.load_state_dict(base_state)
     train_loader = make_loader(train_data, args.batch_size, True, args.seed)
-    metrics, step_logs = train_controlled_adam(
+    metrics, step_logs = train_controlled_muon(
         model,
         train_loader,
         eval_train_loader,
@@ -954,15 +759,7 @@ def main() -> None:
     output_dir = args.output_dir or Path("outputs") / args.dataset
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    datasets = load_image_dataset_bundle(
-        args.data_dir,
-        args.dataset,
-        args.train_subset,
-        args.test_subset,
-        args.seed,
-        args.download,
-        args.fashion_folder,
-    )
+    datasets = load_image_dataset_bundle(args.data_dir, args.dataset, args.train_subset, args.test_subset, args.seed, args.download, args.fashion_folder)
     train_data = datasets.train_data
     eval_train_data = datasets.eval_train_data
     test_data = datasets.test_data
@@ -971,18 +768,15 @@ def main() -> None:
     eval_test_loader = make_loader(test_data, args.batch_size, False, args.seed)
 
     base_model = make_model(args.model, dataset_name).to(device)
-    base_state = {
-        name: tensor.detach().clone()
-        for name, tensor in base_model.state_dict().items()
-    }
+    base_state = {name: tensor.detach().clone() for name, tensor in base_model.state_dict().items()}
     save_run_metadata(output_dir, args, datasets, base_model, dataset_name)
 
     criterion = nn.CrossEntropyLoss()
-    runs = []
+    runs: list[OptimizerRun] = []
 
     vanilla_model = make_model(args.model, dataset_name).to(device)
     vanilla_model.load_state_dict(base_state)
-    vanilla_metrics = train_vanilla_adam(
+    vanilla_metrics = train_vanilla_muon(
         vanilla_model,
         make_loader(train_data, args.batch_size, True, args.seed),
         eval_train_loader,
@@ -992,13 +786,14 @@ def main() -> None:
         args.epochs,
         args.lr,
         args.seed,
+        MuonConfig(),
     )
-    runs.append(OptimizerRun("vanilla_adam", vanilla_metrics))
+    runs.append(OptimizerRun("vanilla_muon", vanilla_metrics))
 
     if args.ablation:
         runs.append(
             run_controlled_variant(
-                "fixed_adam_direction",
+                "fixed_muon_direction",
                 base_state,
                 train_data,
                 eval_train_loader,
@@ -1019,110 +814,19 @@ def main() -> None:
                 alpha_max=args.lr,
             )
         )
-        runs.append(
-            run_controlled_variant(
-                "controlled_raw_rho",
-                base_state,
-                train_data,
-                eval_train_loader,
-                eval_test_loader,
-                criterion,
-                device,
-                args,
-                dataset_name,
-                alpha0=args.lr,
-                kp=args.controlled_kp,
-                rho_beta=0.0,
-                min_alpha_factor=args.controlled_min_alpha_factor,
-                max_alpha_factor=args.controlled_max_alpha_factor,
-                trust_region_expand=False,
-                use_rho_ema=False,
-                reject_bad_steps=True,
-            )
-        )
-        runs.append(
-            run_controlled_variant(
-                "controlled_ema",
-                base_state,
-                train_data,
-                eval_train_loader,
-                eval_test_loader,
-                criterion,
-                device,
-                args,
-                dataset_name,
-                alpha0=args.lr,
-                kp=args.controlled_kp,
-                rho_beta=args.controlled_rho_beta,
-                min_alpha_factor=args.controlled_min_alpha_factor,
-                max_alpha_factor=args.controlled_max_alpha_factor,
-                trust_region_expand=False,
-                use_rho_ema=True,
-                reject_bad_steps=True,
-            )
-        )
-        runs.append(
-            run_controlled_variant(
-                "controlled_ema_trust",
-                base_state,
-                train_data,
-                eval_train_loader,
-                eval_test_loader,
-                criterion,
-                device,
-                args,
-                dataset_name,
-                alpha0=args.lr,
-                kp=args.controlled_kp,
-                rho_beta=args.controlled_rho_beta,
-                min_alpha_factor=args.controlled_min_alpha_factor,
-                max_alpha_factor=args.controlled_max_alpha_factor,
-                trust_region_expand=args.controlled_trust_region_expand,
-                use_rho_ema=True,
-                reject_bad_steps=True,
-            )
-        )
+        runs.append(run_controlled_variant("controlled_raw_rho", base_state, train_data, eval_train_loader, eval_test_loader, criterion, device, args, dataset_name, alpha0=args.lr, kp=args.controlled_kp, rho_beta=0.0, min_alpha_factor=args.controlled_min_alpha_factor, max_alpha_factor=args.controlled_max_alpha_factor, trust_region_expand=False, use_rho_ema=False, reject_bad_steps=True))
+        runs.append(run_controlled_variant("controlled_ema", base_state, train_data, eval_train_loader, eval_test_loader, criterion, device, args, dataset_name, alpha0=args.lr, kp=args.controlled_kp, rho_beta=args.controlled_rho_beta, min_alpha_factor=args.controlled_min_alpha_factor, max_alpha_factor=args.controlled_max_alpha_factor, trust_region_expand=False, use_rho_ema=True, reject_bad_steps=True))
+        runs.append(run_controlled_variant("controlled_ema_trust", base_state, train_data, eval_train_loader, eval_test_loader, criterion, device, args, dataset_name, alpha0=args.lr, kp=args.controlled_kp, rho_beta=args.controlled_rho_beta, min_alpha_factor=args.controlled_min_alpha_factor, max_alpha_factor=args.controlled_max_alpha_factor, trust_region_expand=args.controlled_trust_region_expand, use_rho_ema=True, reject_bad_steps=True))
     else:
-        runs.append(
-            run_controlled_variant(
-                "controlled_adam",
-                base_state,
-                train_data,
-                eval_train_loader,
-                eval_test_loader,
-                criterion,
-                device,
-                args,
-                dataset_name,
-                alpha0=args.lr,
-                kp=args.controlled_kp,
-                rho_beta=args.controlled_rho_beta,
-                min_alpha_factor=args.controlled_min_alpha_factor,
-                max_alpha_factor=args.controlled_max_alpha_factor,
-                trust_region_expand=args.controlled_trust_region_expand,
-                use_rho_ema=True,
-                reject_bad_steps=True,
-            )
-        )
+        runs.append(run_controlled_variant("controlled_muon", base_state, train_data, eval_train_loader, eval_test_loader, criterion, device, args, dataset_name, alpha0=args.lr, kp=args.controlled_kp, rho_beta=args.controlled_rho_beta, min_alpha_factor=args.controlled_min_alpha_factor, max_alpha_factor=args.controlled_max_alpha_factor, trust_region_expand=args.controlled_trust_region_expand, use_rho_ema=True, reject_bad_steps=True))
 
     prefix = dataset_name
-    save_epoch_metrics(
-        output_dir / f"{prefix}_epoch_metrics.csv",
-        runs,
-    )
+    save_epoch_metrics(output_dir / f"{prefix}_epoch_metrics.csv", runs)
     for run in runs:
         if run.step_logs is None:
             continue
-        diagnostics_name = (
-            f"{prefix}_controlled_step_diagnostics.csv"
-            if not args.ablation and run.name == "controlled_adam"
-            else f"{prefix}_{slugify(run.name)}_step_diagnostics.csv"
-        )
-        save_step_logs(
-            output_dir / diagnostics_name,
-            run.step_logs,
-            optimizer_name=run.name,
-        )
+        diagnostics_name = f"{prefix}_{slugify(run.name)}_step_diagnostics.csv"
+        save_step_logs(output_dir / diagnostics_name, run.step_logs, optimizer_name=run.name)
     plot_metrics(output_dir, dataset_name, runs)
 
     print(f"Dataset: {dataset_name}")

@@ -518,6 +518,464 @@ Interpretation:
   selection: save/best-epoch reporting, early stopping, or a late-training alpha
   decay/recovery policy.
 
+CIFAR-10 CNN benchmark:
+
+- Added CIFAR-10 support to `controlled_adam_project/examples/run_mnist_demo.py`.
+- Added `SmallCIFARCNN`, a simple 3-layer convolutional classifier for 32x32 RGB
+  images.
+- Added `--model {auto,mlp,cnn}`. `auto` uses the MLP for MNIST/Fashion-MNIST
+  and the CNN for CIFAR-10.
+- CIFAR-10 download through torchvision initially produced a truncated archive.
+  A resumable `curl` repair fixed the archive checksum, then torchvision
+  extracted it successfully under `controlled_adam_project/data/`.
+- Added a root `.gitignore` rule for local CIFAR tarballs.
+
+Smoke checks:
+
+```bash
+MPLCONFIGDIR=/private/tmp PYTHONPATH=src python examples/run_mnist_demo.py \
+  --dataset cifar10 \
+  --download \
+  --epochs 1 \
+  --train-subset 256 \
+  --test-subset 128 \
+  --batch-size 64 \
+  --lr 1e-3 \
+  --ablation \
+  --output-dir outputs/cifar10_cnn_ablation_smoke
+```
+
+and a no-download load smoke after extraction:
+
+```bash
+MPLCONFIGDIR=/private/tmp PYTHONPATH=src python examples/run_mnist_demo.py \
+  --dataset cifar10 \
+  --epochs 1 \
+  --train-subset 64 \
+  --test-subset 32 \
+  --batch-size 32 \
+  --lr 1e-3 \
+  --output-dir outputs/cifar10_cnn_load_smoke
+```
+
+20-epoch CIFAR-10 CNN ablation on a 5000/1000 deterministic subset with tuned1
+controller settings:
+
+```bash
+MPLCONFIGDIR=/private/tmp PYTHONPATH=src python examples/run_mnist_demo.py \
+  --dataset cifar10 \
+  --epochs 20 \
+  --train-subset 5000 \
+  --test-subset 1000 \
+  --batch-size 128 \
+  --lr 1e-3 \
+  --ablation \
+  --controlled-alpha-min 1e-4 \
+  --controlled-trust-alpha-threshold 1e-3 \
+  --controlled-trust-expand-factor 2.0 \
+  --controlled-max-alpha-factor 1.2 \
+  --output-dir outputs/cifar10_cnn_20epochs_ablation_tuned1
+```
+
+Final epoch result:
+
+```text
+vanilla_adam          test_acc=0.397  train_acc=0.4092
+fixed_adam_direction test_acc=0.402  train_acc=0.4182  mean_alpha=1.00e-03
+controlled_raw_rho   test_acc=0.302  train_acc=0.3056  mean_alpha=1.01e-04
+controlled_ema       test_acc=0.305  train_acc=0.3060  mean_alpha=1.01e-04
+controlled_ema_trust test_acc=0.311  train_acc=0.3216  mean_alpha=1.00e-04
+```
+
+Best epoch by test accuracy:
+
+```text
+vanilla_adam          epoch=19  best_test_acc=0.406
+fixed_adam_direction epoch=20  best_test_acc=0.402
+controlled_raw_rho   epoch=20  best_test_acc=0.302
+controlled_ema       epoch=20  best_test_acc=0.305
+controlled_ema_trust epoch=16  best_test_acc=0.314
+```
+
+Diagnostics:
+
+```text
+fixed_adam_direction accepted=0.8938 alpha_final=1.00e-03
+controlled_raw_rho   accepted=0.8588 alpha_final=1.01e-04
+controlled_ema       accepted=0.8638 alpha_final=1.01e-04
+controlled_ema_trust accepted=0.8300 alpha_final=1.01e-04 alpha_max_seen=2.33e-03 trust_expansions=21/800
+```
+
+Interpretation:
+
+- The CIFAR-10 CNN path works and writes the same epoch/diagnostic plots.
+- On this harder RGB benchmark, the Fashion-MNIST tuned controller is too
+  conservative. Controlled variants remain around the alpha floor and lag
+  vanilla/fixed Adam-direction by about 9 percentage points.
+- Next likely CIFAR improvement: tune controller settings separately for CNNs,
+  probably with a larger useful alpha floor or a progress-aware recovery rule.
+
+20-epoch CIFAR-10 CNN ablation with first CIFAR-specific tuning:
+
+```bash
+MPLCONFIGDIR=/private/tmp PYTHONPATH=src python examples/run_mnist_demo.py \
+  --dataset cifar10 \
+  --epochs 20 \
+  --train-subset 5000 \
+  --test-subset 1000 \
+  --batch-size 128 \
+  --lr 1e-3 \
+  --ablation \
+  --controlled-alpha-min 5e-4 \
+  --controlled-trust-alpha-threshold 2e-3 \
+  --controlled-trust-expand-factor 2.5 \
+  --controlled-max-alpha-factor 1.25 \
+  --controlled-rho-star 0.5 \
+  --output-dir outputs/cifar10_cnn_20epochs_ablation_tuned_cifar1
+```
+
+Final epoch result:
+
+```text
+vanilla_adam          test_acc=0.397  train_acc=0.4092
+fixed_adam_direction test_acc=0.402  train_acc=0.4182  mean_alpha=1.00e-03
+controlled_raw_rho   test_acc=0.337  train_acc=0.3484  mean_alpha=4.76e-04
+controlled_ema       test_acc=0.352  train_acc=0.3494  mean_alpha=4.81e-04
+controlled_ema_trust test_acc=0.354  train_acc=0.3506  mean_alpha=4.52e-04
+```
+
+Best epoch by test accuracy:
+
+```text
+vanilla_adam          epoch=19  best_test_acc=0.406
+fixed_adam_direction epoch=20  best_test_acc=0.402
+controlled_raw_rho   epoch=19  best_test_acc=0.353
+controlled_ema       epoch=19  best_test_acc=0.361
+controlled_ema_trust epoch=19  best_test_acc=0.363
+```
+
+Diagnostics:
+
+```text
+fixed_adam_direction accepted=0.8938 alpha_final=1.00e-03
+controlled_raw_rho   accepted=0.8600 alpha_final=5.14e-04 alpha_max_seen=1.62e-03
+controlled_ema       accepted=0.8600 alpha_final=5.06e-04 alpha_max_seen=1.62e-03
+controlled_ema_trust accepted=0.8512 alpha_final=5.01e-04 alpha_max_seen=3.17e-03 trust_expansions=1/800
+```
+
+Interpretation:
+
+- Raising the alpha floor from `1e-4` to `5e-4` improved the controlled CNN
+  variants substantially, but they still lag fixed Adam-direction.
+- Trust expansion barely fires on this setting (`1/800`), so the main effect is
+  the higher alpha floor and lower `rho_star`.
+- CIFAR/CNN likely needs either an even higher floor closer to `1e-3`, looser
+  acceptance, or a progress-aware rule rather than relying on high-rho trust
+  expansion.
+
+Stronger CIFAR-10 CNN setup:
+
+- Replaced the tiny CIFAR CNN with a stronger batch-normalized CNN:
+  two Conv-BN-ReLU layers per block, three max-pool blocks, and a small MLP
+  classifier head.
+- BatchNorm uses `track_running_stats=False` so same-minibatch trial loss
+  evaluations do not mutate running statistics.
+- CIFAR-10 training now uses normalization plus random crop and horizontal flip.
+- Train/test metrics use deterministic normalized evaluation transforms on the
+  same subset indices, so reported train accuracy is not polluted by random
+  augmentation.
+- The script resets the seed at the start of each epoch for each optimizer
+  variant, keeping augmentation randomness aligned across variants.
+
+Smoke checks after the stronger-CNN refactor:
+
+```bash
+MPLCONFIGDIR=/private/tmp PYTHONPATH=src python examples/run_mnist_demo.py \
+  --dataset cifar10 \
+  --epochs 1 \
+  --train-subset 128 \
+  --test-subset 64 \
+  --batch-size 64 \
+  --lr 1e-3 \
+  --output-dir outputs/cifar10_stronger_cnn_smoke
+
+MPLCONFIGDIR=/private/tmp PYTHONPATH=src python examples/run_mnist_demo.py \
+  --dataset fashion_mnist \
+  --fashion-folder ../fashion \
+  --epochs 1 \
+  --train-subset 128 \
+  --test-subset 64 \
+  --batch-size 64 \
+  --lr 1e-3 \
+  --output-dir outputs/fashion_mnist_after_cifar_refactor_smoke
+```
+
+10-epoch CIFAR-10 stronger-CNN ablation on the 5000/1000 deterministic subset:
+
+```bash
+MPLCONFIGDIR=/private/tmp PYTHONPATH=src python examples/run_mnist_demo.py \
+  --dataset cifar10 \
+  --epochs 10 \
+  --train-subset 5000 \
+  --test-subset 1000 \
+  --batch-size 128 \
+  --lr 1e-3 \
+  --ablation \
+  --controlled-alpha-min 5e-4 \
+  --controlled-trust-alpha-threshold 2e-3 \
+  --controlled-trust-expand-factor 2.5 \
+  --controlled-max-alpha-factor 1.25 \
+  --controlled-rho-star 0.5 \
+  --output-dir outputs/cifar10_stronger_cnn_10epochs_ablation_tuned_cifar1
+```
+
+Final epoch result:
+
+```text
+vanilla_adam          test_acc=0.584  train_acc=0.6528
+fixed_adam_direction test_acc=0.596  train_acc=0.6456  mean_alpha=1.00e-03
+controlled_raw_rho   test_acc=0.515  train_acc=0.5426  mean_alpha=2.39e-03
+controlled_ema       test_acc=0.589  train_acc=0.6590  mean_alpha=6.60e-04
+controlled_ema_trust test_acc=0.589  train_acc=0.6590  mean_alpha=6.60e-04
+```
+
+Best epoch by test accuracy:
+
+```text
+vanilla_adam          epoch=9   best_test_acc=0.611
+fixed_adam_direction epoch=9   best_test_acc=0.601
+controlled_raw_rho   epoch=8   best_test_acc=0.553
+controlled_ema       epoch=10  best_test_acc=0.589
+controlled_ema_trust epoch=10  best_test_acc=0.589
+```
+
+Diagnostics:
+
+```text
+fixed_adam_direction accepted=0.9925 alpha_final=1.00e-03
+controlled_raw_rho   accepted=0.9900 alpha_final=3.07e-03 alpha_max_seen=3.08e-03
+controlled_ema       accepted=0.9925 alpha_final=9.34e-04 alpha_max_seen=2.30e-03
+controlled_ema_trust accepted=0.9925 alpha_final=9.34e-04 alpha_max_seen=2.30e-03 trust_expansions=0/400
+```
+
+Interpretation:
+
+- The vanilla CIFAR baseline is now much more reasonable for a 5000-image
+  subset and 10 epochs (`0.584` final, `0.611` best).
+- EMA-controlled Adam is close to vanilla/fixed-direction and keeps alpha near
+  the useful `1e-3` scale.
+- Raw rho overshoots alpha to about `3e-3` and performs worse.
+- Trust recovery did not fire in this run because EMA control already kept
+  alpha in a healthy range.
+- A longer run or full-dataset run is now meaningful, but it will take
+  noticeably longer with the stronger CNN.
+
+40-epoch CIFAR-10 stronger-CNN ablation on the 5000/1000 deterministic subset:
+
+```bash
+MPLCONFIGDIR=/private/tmp PYTHONPATH=src python examples/run_mnist_demo.py \
+  --dataset cifar10 \
+  --epochs 40 \
+  --train-subset 5000 \
+  --test-subset 1000 \
+  --batch-size 128 \
+  --lr 1e-3 \
+  --ablation \
+  --controlled-alpha-min 5e-4 \
+  --controlled-trust-alpha-threshold 2e-3 \
+  --controlled-trust-expand-factor 2.5 \
+  --controlled-max-alpha-factor 1.25 \
+  --controlled-rho-star 0.5 \
+  --output-dir outputs/cifar10_stronger_cnn_40epochs_ablation_tuned_cifar1
+```
+
+Final epoch result:
+
+```text
+vanilla_adam          test_acc=0.718  train_acc=0.8804
+fixed_adam_direction test_acc=0.717  train_acc=0.8886  mean_alpha=1.00e-03
+controlled_raw_rho   test_acc=0.640  train_acc=0.6954  mean_alpha=4.99e-02
+controlled_ema       test_acc=0.601  train_acc=0.6364  mean_alpha=5.00e-02
+controlled_ema_trust test_acc=0.601  train_acc=0.6364  mean_alpha=5.00e-02
+```
+
+Best epoch by test accuracy:
+
+```text
+vanilla_adam          epoch=34  best_test_acc=0.720
+fixed_adam_direction epoch=40  best_test_acc=0.717
+controlled_raw_rho   epoch=23  best_test_acc=0.692
+controlled_ema       epoch=23  best_test_acc=0.672
+controlled_ema_trust epoch=23  best_test_acc=0.672
+```
+
+Diagnostics:
+
+```text
+fixed_adam_direction accepted=0.9956 alpha_final=1.00e-03
+controlled_raw_rho   accepted=0.9956 alpha_final=4.92e-02 alpha_max_seen=5.00e-02
+controlled_ema       accepted=0.9969 alpha_final=5.00e-02 alpha_max_seen=5.00e-02
+controlled_ema_trust accepted=0.9969 alpha_final=5.00e-02 alpha_max_seen=5.00e-02 trust_expansions=0/1600
+```
+
+Interpretation:
+
+- Vanilla/fixed Adam are now credible on the subset, reaching about `0.72`
+  test accuracy.
+- Controlled variants peak around epoch 23, then degrade because alpha keeps
+  growing until it hits `alpha_max=0.05`, far above the useful fixed `1e-3`
+  scale.
+- Trust recovery is irrelevant in this long CIFAR run because it never fires;
+  the problem is now excessive alpha growth, not collapse.
+- Next likely CIFAR setting: cap `controlled-alpha-max` around `2e-3` to
+  `5e-3`, or add a schedule/progress-aware rule that stops expansion when
+  generalization or actual progress stalls.
+
+40-epoch CIFAR-10 stronger-CNN ablation with capped alpha:
+
+```bash
+MPLCONFIGDIR=/private/tmp PYTHONPATH=src python examples/run_mnist_demo.py \
+  --dataset cifar10 \
+  --epochs 40 \
+  --train-subset 5000 \
+  --test-subset 1000 \
+  --batch-size 128 \
+  --lr 1e-3 \
+  --ablation \
+  --controlled-alpha-min 5e-4 \
+  --controlled-alpha-max 3e-3 \
+  --controlled-trust-alpha-threshold 2e-3 \
+  --controlled-trust-expand-factor 2.5 \
+  --controlled-max-alpha-factor 1.1 \
+  --controlled-rho-star 0.5 \
+  --output-dir outputs/cifar10_stronger_cnn_40epochs_ablation_alpha_cap_3e3
+```
+
+Final epoch result:
+
+```text
+vanilla_adam          test_acc=0.718  train_acc=0.8804
+fixed_adam_direction test_acc=0.717  train_acc=0.8886  mean_alpha=1.00e-03
+controlled_raw_rho   test_acc=0.683  train_acc=0.8296  mean_alpha=2.98e-03
+controlled_ema       test_acc=0.715  train_acc=0.8754  mean_alpha=3.00e-03
+controlled_ema_trust test_acc=0.684  train_acc=0.8522  mean_alpha=3.00e-03
+```
+
+Best epoch by test accuracy:
+
+```text
+vanilla_adam          epoch=34  best_test_acc=0.720
+fixed_adam_direction epoch=40  best_test_acc=0.717
+controlled_raw_rho   epoch=38  best_test_acc=0.739
+controlled_ema       epoch=40  best_test_acc=0.715
+controlled_ema_trust epoch=33  best_test_acc=0.720
+```
+
+Diagnostics:
+
+```text
+fixed_adam_direction accepted=0.9956 alpha_final=1.00e-03
+controlled_raw_rho   accepted=0.9938 alpha_final=3.00e-03 alpha_max_seen=3.00e-03
+controlled_ema       accepted=0.9950 alpha_final=3.00e-03 alpha_max_seen=3.00e-03
+controlled_ema_trust accepted=0.9944 alpha_final=3.00e-03 alpha_max_seen=3.00e-03 trust_expansions=2/1600
+```
+
+Interpretation:
+
+- Capping alpha at `3e-3` largely fixed the previous long-run failure where
+  alpha grew to `5e-2`.
+- Controlled EMA now essentially matches vanilla/fixed Adam at the final epoch
+  (`0.715` vs `0.718/0.717`).
+- Raw rho reaches the best peak score (`0.739` at epoch 38) but gives some
+  performance back by epoch 40.
+- Trust expansion again has little impact on this CIFAR setting; the main
+  control variables are alpha cap, rho target, and EMA/raw rho behavior.
+- Next useful experiment: add best-epoch reporting/early stopping and test a
+  slightly tighter cap, e.g. `controlled-alpha-max=2e-3`, because every
+  controlled variant still ends at the cap.
+
+40-epoch CIFAR-10 stronger-CNN ablation with tighter alpha cap and metadata:
+
+```bash
+MPLCONFIGDIR=/private/tmp PYTHONPATH=src python examples/run_mnist_demo.py \
+  --dataset cifar10 \
+  --epochs 40 \
+  --train-subset 5000 \
+  --test-subset 1000 \
+  --batch-size 128 \
+  --lr 1e-3 \
+  --ablation \
+  --controlled-alpha-min 5e-4 \
+  --controlled-alpha-max 1.5e-3 \
+  --controlled-max-alpha-factor 1.05 \
+  --controlled-rho-star 0.6 \
+  --controlled-trust-alpha-threshold 1e-3 \
+  --controlled-trust-expand-factor 1.5 \
+  --output-dir outputs/cifar10_stronger_cnn_40epochs_ablation_alpha_cap_1p5e3
+```
+
+The runner now writes `run_metadata.json` and `run_metadata.txt` before
+training, including:
+
+- Python/PyTorch/device/seed;
+- dataset full sizes and subset sizes;
+- train/eval transforms;
+- model class, full architecture, and trainable parameter count;
+- optimizer variants and all controller hyperparameters.
+
+Run metadata summary:
+
+```text
+dataset: CIFAR-10
+train_size_full/test_size_full: 50000/10000
+train_size_used/test_size_used: 5000/1000
+model: SmallCIFARCNN
+trainable_parameters: 815018
+train_transform: RandomCrop(32,padding=4), RandomHorizontalFlip, ToTensor, Normalize
+eval_transform: ToTensor, Normalize
+```
+
+Final epoch result:
+
+```text
+vanilla_adam          test_acc=0.718  train_acc=0.8804
+fixed_adam_direction test_acc=0.717  train_acc=0.8886  mean_alpha=1.00e-03
+controlled_raw_rho   test_acc=0.711  train_acc=0.8704  mean_alpha=1.06e-03
+controlled_ema       test_acc=0.704  train_acc=0.8550  mean_alpha=1.50e-03
+controlled_ema_trust test_acc=0.731  train_acc=0.8936  mean_alpha=9.49e-04
+```
+
+Best epoch by test accuracy:
+
+```text
+vanilla_adam          epoch=34  best_test_acc=0.720
+fixed_adam_direction epoch=40  best_test_acc=0.717
+controlled_raw_rho   epoch=38  best_test_acc=0.735
+controlled_ema       epoch=33  best_test_acc=0.709
+controlled_ema_trust epoch=40  best_test_acc=0.731
+```
+
+Diagnostics:
+
+```text
+fixed_adam_direction accepted=0.9956 alpha_final=1.00e-03
+controlled_raw_rho   accepted=0.9931 alpha_final=1.29e-03 alpha_max_seen=1.50e-03
+controlled_ema       accepted=0.9944 alpha_final=1.50e-03 alpha_max_seen=1.50e-03
+controlled_ema_trust accepted=0.9938 alpha_final=1.23e-03 alpha_max_seen=1.50e-03 trust_expansions=1/1600
+```
+
+Interpretation:
+
+- This is the best CIFAR-10 stronger-CNN final result so far.
+- `controlled_ema_trust` beats vanilla/fixed Adam at the final epoch
+  (`0.731` vs `0.718/0.717`), while raw rho has the highest peak (`0.735`).
+- The tighter `1.5e-3` cap keeps controlled alpha near the useful Adam scale
+  instead of letting it drift to `3e-3` or `5e-2`.
+- Trust expansion still barely fires, so the improvement mostly comes from
+  alpha range and slower growth, not from frequent trust recovery.
+- Best-epoch reporting and incremental progress logging are now high-priority
+  quality-of-life improvements for long CNN runs.
+
 Important rho/alpha diagnosis:
 
 - When global step size `alpha` becomes tiny, `rho` naturally tends toward 1
@@ -606,6 +1064,68 @@ Fashion-MNIST outputs:
 - `controlled_adam_project/outputs/fashion_mnist_100epochs_ablation_tuned1/fashion_mnist_accuracy.png`
 - `controlled_adam_project/outputs/fashion_mnist_100epochs_ablation_tuned1/fashion_mnist_controlled_alpha.png`
 - `controlled_adam_project/outputs/fashion_mnist_100epochs_ablation_tuned1/fashion_mnist_controlled_rho.png`
+- `controlled_adam_project/outputs/cifar10_cnn_ablation_smoke/cifar10_epoch_metrics.csv`
+- `controlled_adam_project/outputs/cifar10_cnn_load_smoke/cifar10_epoch_metrics.csv`
+- `controlled_adam_project/outputs/cifar10_cnn_20epochs_ablation_tuned1/cifar10_epoch_metrics.csv`
+- `controlled_adam_project/outputs/cifar10_cnn_20epochs_ablation_tuned1/cifar10_fixed_adam_direction_step_diagnostics.csv`
+- `controlled_adam_project/outputs/cifar10_cnn_20epochs_ablation_tuned1/cifar10_controlled_raw_rho_step_diagnostics.csv`
+- `controlled_adam_project/outputs/cifar10_cnn_20epochs_ablation_tuned1/cifar10_controlled_ema_step_diagnostics.csv`
+- `controlled_adam_project/outputs/cifar10_cnn_20epochs_ablation_tuned1/cifar10_controlled_ema_trust_step_diagnostics.csv`
+- `controlled_adam_project/outputs/cifar10_cnn_20epochs_ablation_tuned1/cifar10_loss.png`
+- `controlled_adam_project/outputs/cifar10_cnn_20epochs_ablation_tuned1/cifar10_accuracy.png`
+- `controlled_adam_project/outputs/cifar10_cnn_20epochs_ablation_tuned1/cifar10_controlled_alpha.png`
+- `controlled_adam_project/outputs/cifar10_cnn_20epochs_ablation_tuned1/cifar10_controlled_rho.png`
+- `controlled_adam_project/outputs/cifar10_cnn_20epochs_ablation_tuned_cifar1/cifar10_epoch_metrics.csv`
+- `controlled_adam_project/outputs/cifar10_cnn_20epochs_ablation_tuned_cifar1/cifar10_fixed_adam_direction_step_diagnostics.csv`
+- `controlled_adam_project/outputs/cifar10_cnn_20epochs_ablation_tuned_cifar1/cifar10_controlled_raw_rho_step_diagnostics.csv`
+- `controlled_adam_project/outputs/cifar10_cnn_20epochs_ablation_tuned_cifar1/cifar10_controlled_ema_step_diagnostics.csv`
+- `controlled_adam_project/outputs/cifar10_cnn_20epochs_ablation_tuned_cifar1/cifar10_controlled_ema_trust_step_diagnostics.csv`
+- `controlled_adam_project/outputs/cifar10_cnn_20epochs_ablation_tuned_cifar1/cifar10_loss.png`
+- `controlled_adam_project/outputs/cifar10_cnn_20epochs_ablation_tuned_cifar1/cifar10_accuracy.png`
+- `controlled_adam_project/outputs/cifar10_cnn_20epochs_ablation_tuned_cifar1/cifar10_controlled_alpha.png`
+- `controlled_adam_project/outputs/cifar10_cnn_20epochs_ablation_tuned_cifar1/cifar10_controlled_rho.png`
+- `controlled_adam_project/outputs/cifar10_stronger_cnn_smoke/cifar10_epoch_metrics.csv`
+- `controlled_adam_project/outputs/fashion_mnist_after_cifar_refactor_smoke/fashion_mnist_epoch_metrics.csv`
+- `controlled_adam_project/outputs/cifar10_stronger_cnn_10epochs_ablation_tuned_cifar1/cifar10_epoch_metrics.csv`
+- `controlled_adam_project/outputs/cifar10_stronger_cnn_10epochs_ablation_tuned_cifar1/cifar10_fixed_adam_direction_step_diagnostics.csv`
+- `controlled_adam_project/outputs/cifar10_stronger_cnn_10epochs_ablation_tuned_cifar1/cifar10_controlled_raw_rho_step_diagnostics.csv`
+- `controlled_adam_project/outputs/cifar10_stronger_cnn_10epochs_ablation_tuned_cifar1/cifar10_controlled_ema_step_diagnostics.csv`
+- `controlled_adam_project/outputs/cifar10_stronger_cnn_10epochs_ablation_tuned_cifar1/cifar10_controlled_ema_trust_step_diagnostics.csv`
+- `controlled_adam_project/outputs/cifar10_stronger_cnn_10epochs_ablation_tuned_cifar1/cifar10_loss.png`
+- `controlled_adam_project/outputs/cifar10_stronger_cnn_10epochs_ablation_tuned_cifar1/cifar10_accuracy.png`
+- `controlled_adam_project/outputs/cifar10_stronger_cnn_10epochs_ablation_tuned_cifar1/cifar10_controlled_alpha.png`
+- `controlled_adam_project/outputs/cifar10_stronger_cnn_10epochs_ablation_tuned_cifar1/cifar10_controlled_rho.png`
+- `controlled_adam_project/outputs/cifar10_stronger_cnn_40epochs_ablation_tuned_cifar1/cifar10_epoch_metrics.csv`
+- `controlled_adam_project/outputs/cifar10_stronger_cnn_40epochs_ablation_tuned_cifar1/cifar10_fixed_adam_direction_step_diagnostics.csv`
+- `controlled_adam_project/outputs/cifar10_stronger_cnn_40epochs_ablation_tuned_cifar1/cifar10_controlled_raw_rho_step_diagnostics.csv`
+- `controlled_adam_project/outputs/cifar10_stronger_cnn_40epochs_ablation_tuned_cifar1/cifar10_controlled_ema_step_diagnostics.csv`
+- `controlled_adam_project/outputs/cifar10_stronger_cnn_40epochs_ablation_tuned_cifar1/cifar10_controlled_ema_trust_step_diagnostics.csv`
+- `controlled_adam_project/outputs/cifar10_stronger_cnn_40epochs_ablation_tuned_cifar1/cifar10_loss.png`
+- `controlled_adam_project/outputs/cifar10_stronger_cnn_40epochs_ablation_tuned_cifar1/cifar10_accuracy.png`
+- `controlled_adam_project/outputs/cifar10_stronger_cnn_40epochs_ablation_tuned_cifar1/cifar10_controlled_alpha.png`
+- `controlled_adam_project/outputs/cifar10_stronger_cnn_40epochs_ablation_tuned_cifar1/cifar10_controlled_rho.png`
+- `controlled_adam_project/outputs/cifar10_stronger_cnn_40epochs_ablation_alpha_cap_3e3/cifar10_epoch_metrics.csv`
+- `controlled_adam_project/outputs/cifar10_stronger_cnn_40epochs_ablation_alpha_cap_3e3/cifar10_fixed_adam_direction_step_diagnostics.csv`
+- `controlled_adam_project/outputs/cifar10_stronger_cnn_40epochs_ablation_alpha_cap_3e3/cifar10_controlled_raw_rho_step_diagnostics.csv`
+- `controlled_adam_project/outputs/cifar10_stronger_cnn_40epochs_ablation_alpha_cap_3e3/cifar10_controlled_ema_step_diagnostics.csv`
+- `controlled_adam_project/outputs/cifar10_stronger_cnn_40epochs_ablation_alpha_cap_3e3/cifar10_controlled_ema_trust_step_diagnostics.csv`
+- `controlled_adam_project/outputs/cifar10_stronger_cnn_40epochs_ablation_alpha_cap_3e3/cifar10_loss.png`
+- `controlled_adam_project/outputs/cifar10_stronger_cnn_40epochs_ablation_alpha_cap_3e3/cifar10_accuracy.png`
+- `controlled_adam_project/outputs/cifar10_stronger_cnn_40epochs_ablation_alpha_cap_3e3/cifar10_controlled_alpha.png`
+- `controlled_adam_project/outputs/cifar10_stronger_cnn_40epochs_ablation_alpha_cap_3e3/cifar10_controlled_rho.png`
+- `controlled_adam_project/outputs/cifar10_metadata_smoke/run_metadata.json`
+- `controlled_adam_project/outputs/cifar10_metadata_smoke/run_metadata.txt`
+- `controlled_adam_project/outputs/cifar10_stronger_cnn_40epochs_ablation_alpha_cap_1p5e3/run_metadata.json`
+- `controlled_adam_project/outputs/cifar10_stronger_cnn_40epochs_ablation_alpha_cap_1p5e3/run_metadata.txt`
+- `controlled_adam_project/outputs/cifar10_stronger_cnn_40epochs_ablation_alpha_cap_1p5e3/cifar10_epoch_metrics.csv`
+- `controlled_adam_project/outputs/cifar10_stronger_cnn_40epochs_ablation_alpha_cap_1p5e3/cifar10_fixed_adam_direction_step_diagnostics.csv`
+- `controlled_adam_project/outputs/cifar10_stronger_cnn_40epochs_ablation_alpha_cap_1p5e3/cifar10_controlled_raw_rho_step_diagnostics.csv`
+- `controlled_adam_project/outputs/cifar10_stronger_cnn_40epochs_ablation_alpha_cap_1p5e3/cifar10_controlled_ema_step_diagnostics.csv`
+- `controlled_adam_project/outputs/cifar10_stronger_cnn_40epochs_ablation_alpha_cap_1p5e3/cifar10_controlled_ema_trust_step_diagnostics.csv`
+- `controlled_adam_project/outputs/cifar10_stronger_cnn_40epochs_ablation_alpha_cap_1p5e3/cifar10_loss.png`
+- `controlled_adam_project/outputs/cifar10_stronger_cnn_40epochs_ablation_alpha_cap_1p5e3/cifar10_accuracy.png`
+- `controlled_adam_project/outputs/cifar10_stronger_cnn_40epochs_ablation_alpha_cap_1p5e3/cifar10_controlled_alpha.png`
+- `controlled_adam_project/outputs/cifar10_stronger_cnn_40epochs_ablation_alpha_cap_1p5e3/cifar10_controlled_rho.png`
 
 Note: `outputs/fashion_mnist/` also contains older `sklearn_digits_*` files from
 an earlier fallback run. The `fashion_mnist_*` files are the real Fashion-MNIST

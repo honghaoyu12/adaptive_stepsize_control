@@ -1,8 +1,19 @@
-"""Tests for Muon optimizers."""
+"""Tests for Muon objectives and optimizers."""
 
 import numpy as np
 
-from controlled_muon.objectives import MatrixQuadraticObjective
+from controlled_muon.objectives import (
+    Ackley,
+    AnisotropicQuadratic,
+    Beale,
+    Easom,
+    GoldsteinPrice,
+    Himmelblau,
+    MatrixQuadraticObjective,
+    Rastrigin,
+    Rosenbrock,
+    SixHumpCamel,
+)
 from controlled_muon.optimizers import MuonConfig, controlled_muon, vanilla_muon
 from controlled_muon.orthogonalization import orthogonalize
 
@@ -47,3 +58,25 @@ def test_controlled_muon_reduces_objective() -> None:
     assert np.all(history.step_sizes > 0)
     assert history.rhos is not None
     assert history.accepted is not None
+
+
+def test_benchmark_gradients_finite_difference() -> None:
+    cases = [
+        (Himmelblau(), np.array([-3.5, 0.5])),
+        (Rastrigin(), np.array([3.3, 2.8])),
+        (Beale(), np.array([1.0, 1.0])),
+        (Ackley(), np.array([1.2, -0.7])),
+        (SixHumpCamel(), np.array([0.4, -0.8])),
+        (GoldsteinPrice(), np.array([0.2, -0.8])),
+        (Easom(), np.array([2.8, 3.3])),
+        (Rosenbrock(), np.array([-1.2, 1.1])),
+    ]
+
+    h = 1e-6
+    for objective, x in cases:
+        fd = np.zeros_like(x)
+        for i in range(len(x)):
+            step = np.zeros_like(x)
+            step[i] = h
+            fd[i] = (objective.value(x + step) - objective.value(x - step)) / (2 * h)
+        np.testing.assert_allclose(objective.gradient(x), fd, rtol=1e-5, atol=1e-5)

@@ -382,6 +382,60 @@ outputs/mnist/mnist_controlled_rho.png
 The controlled optimizer implementation lives in
 `src/controlled_adam/torch_optimizers.py` as `TorchControlledAdam`.
 
+The script also supports CIFAR-10 with a batch-normalized CNN, CIFAR
+normalization, and train-time random crop/flip augmentation:
+
+```bash
+python examples/run_mnist_demo.py \
+  --dataset cifar10 \
+  --download \
+  --model auto \
+  --epochs 10 \
+  --train-subset 5000 \
+  --test-subset 1000 \
+  --batch-size 128 \
+  --lr 1e-3 \
+  --ablation \
+  --controlled-alpha-min 5e-4 \
+  --controlled-trust-alpha-threshold 2e-3 \
+  --controlled-trust-expand-factor 2.5 \
+  --controlled-max-alpha-factor 1.25 \
+  --controlled-rho-star 0.5 \
+  --output-dir outputs/cifar10_stronger_cnn_10epochs_ablation_tuned_cifar1
+```
+
+`--model auto` uses the MLP for MNIST/Fashion-MNIST and the CNN for CIFAR-10.
+If CIFAR-10 is already extracted under `data/`, `--download` is not required.
+For CIFAR-10, training uses random augmentation while train/test metrics use
+deterministic normalized evaluation transforms on the same subset indices.
+
+Recent CIFAR-10 observations:
+
+- The stronger CNN reaches a much more reasonable subset baseline than the
+  earlier tiny CNN: about `0.58-0.61` test accuracy after 10 epochs and about
+  `0.72` after 40 epochs with vanilla/fixed Adam on the 5000/1000 subset.
+- In the 40-epoch controlled run with `controlled-alpha-max=5e-2`, controlled
+  alpha grew all the way to the cap, far above the useful fixed `1e-3` scale,
+  and accuracy degraded after peaking around epoch 23.
+- For the next CIFAR tuning pass, prefer a smaller cap such as
+  `--controlled-alpha-max 3e-3` and possibly a slower growth cap such as
+  `--controlled-max-alpha-factor 1.1`.
+- The `3e-3` cap largely fixes the 40-epoch degradation: controlled EMA reaches
+  about `0.715` final test accuracy on the 5000/1000 subset, close to
+  vanilla/fixed Adam at about `0.718/0.717`. Raw rho peaks higher
+  (`0.739` around epoch 38) but gives some performance back by the final epoch.
+- Since controlled variants still end at the alpha cap, a useful next check is
+  a tighter cap such as `--controlled-alpha-max 2e-3` plus best-epoch reporting
+  or early stopping.
+- A tighter `--controlled-alpha-max 1.5e-3` with
+  `--controlled-max-alpha-factor 1.05` and `--controlled-rho-star 0.6`
+  produced the best CIFAR final result so far on the 5000/1000 subset:
+  `controlled_ema_trust` reached `0.731` final test accuracy, compared with
+  `0.718` for vanilla Adam and `0.717` for fixed Adam-direction.
+- Each benchmark output directory now includes `run_metadata.json` and
+  `run_metadata.txt` with the dataset, transforms, model architecture,
+  trainable parameter count, optimizer variants, and controller hyperparameters.
+
 To run an ablation that isolates which part of the controller matters, add
 `--ablation`:
 
