@@ -1,13 +1,18 @@
 # Conversation Log
 
-Last updated: 2026-05-19
+Last updated: 2026-05-20
+
+Current handoff note: see `PROJECT_HANDOFF.md` first. For a concise
+chronological engineering timeline, see `DEVELOPMENT_LOG.md`. This file remains
+important as the nuanced conversation memory: discussion, interpretation,
+questions, and why decisions evolved.
 
 This log summarizes the current state of the whole `adaptive_stepsize_control`
 workspace so future sessions can resume without rediscovering the project.
 
 ## Workspace Overview
 
-The workspace contains two related Python projects:
+The workspace contains three related Python projects:
 
 1. Root project: `adaptive_stepsize_control`
    - Demonstrates fixed-step gradient descent, noisy stochastic gradient
@@ -21,7 +26,13 @@ The workspace contains two related Python projects:
    - The outer controller chooses the scalar global multiplier `alpha` using an
      actual-over-predicted decrease ratio.
 
-Both projects use a `src/` layout, so commands should be run with
+3. Subproject: `controlled_muon_project`
+   - Muon version of the controlled Adam project.
+   - Muon-style orthogonalization supplies matrix-shaped directions.
+   - Supports the same function benchmark suite plus MNIST, Fashion-MNIST, and
+     CIFAR-10 image benchmarks.
+
+All projects use a `src/` layout, so commands should be run with
 `PYTHONPATH=src` unless the package is installed editable with `pip install -e .`.
 
 ## Root Project: Adaptive Step-Size Control

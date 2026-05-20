@@ -4,6 +4,12 @@ Last updated: 2026-05-20
 
 This document is for a future coding agent taking over the workspace. It is intentionally comprehensive and operational: it explains what the project is, what has been implemented, how to run it, what benchmark results are already known, and what caveats matter.
 
+Related project-memory documents:
+
+- `CONVERSATION_LOG.md`: nuanced discussion history and interpretation.
+- `DEVELOPMENT_LOG.md`: chronological engineering and benchmark timeline.
+- `PROJECT_HANDOFF.md`: current-state operating manual.
+
 ## High-Level Goal
 
 The project studies outer-loop step-size controllers for optimization. The central idea is:
@@ -56,7 +62,8 @@ adaptive_stepsize_control/
 ├── tests/                               # root project tests
 ├── fashion/                             # local Fashion-MNIST IDX gzip files
 ├── mnist/                               # local MNIST files
-├── CONVERSATION_LOG.md                  # older running log
+├── CONVERSATION_LOG.md                  # nuanced discussion history
+├── DEVELOPMENT_LOG.md                   # engineering timeline
 └── PROJECT_HANDOFF.md                   # this file
 ```
 
@@ -66,23 +73,19 @@ Generated outputs and local datasets are intentionally ignored by git.
 
 ## Current Git State
 
-At handoff time there are uncommitted changes. Important modified or new files include:
+The Muon benchmark and handoff work was committed and pushed in:
 
-- `.gitignore`
+```text
+20d1850 Add controlled Muon benchmarks and project handoff
+```
+
+After that commit, additional documentation updates were made to:
+
+- `README.md`
 - `CONVERSATION_LOG.md`
 - `PROJECT_HANDOFF.md`
-- `controlled_adam_project/README.md`
-- `controlled_adam_project/examples/run_mnist_demo.py`
+- `DEVELOPMENT_LOG.md`
 - `controlled_muon_project/README.md`
-- `controlled_muon_project/examples/run_matrix_quadratic_demo.py`
-- `controlled_muon_project/examples/run_mnist_demo.py`
-- `controlled_muon_project/src/controlled_muon/torch_optimizers.py`
-- `controlled_muon_project/src/controlled_muon/objectives.py`
-- `controlled_muon_project/src/controlled_muon/plotting.py`
-- `controlled_muon_project/src/controlled_muon/__init__.py`
-- `controlled_muon_project/tests/test_optimizers.py`
-- `controlled_muon_project/pyproject.toml`
-- `controlled_muon_project/requirements.txt`
 
 There are also two user-provided/untracked comparison files at repo root:
 

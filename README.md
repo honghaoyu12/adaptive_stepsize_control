@@ -68,11 +68,13 @@ This keeps the learning rate positive while increasing or decreasing it smoothly
 
 ---
 
-## Project structure
+## Workspace structure
 
 ```text
 adaptive_stepsize_control/
 ├── README.md
+├── PROJECT_HANDOFF.md
+├── CONVERSATION_LOG.md
 ├── requirements.txt
 ├── pyproject.toml
 ├── src/
@@ -82,12 +84,33 @@ adaptive_stepsize_control/
 │       ├── optimizers.py
 │       └── plotting.py
 ├── examples/
-│   └── run_quadratic_demo.py
+│   ├── run_quadratic_demo.py
+│   └── run_benchmark_functions.py
 ├── tests/
 │   └── test_quadratic_demo.py
-└── outputs/
-    └── .gitkeep
+├── controlled_adam_project/
+└── controlled_muon_project/
 ```
+
+The root project is the original gradient-descent demo. The two subprojects
+apply the same actual-versus-predicted decrease controller to stronger
+optimizer directions:
+
+- `controlled_adam_project/`: Adam chooses the direction; the controller chooses
+  the global multiplier.
+- `controlled_muon_project/`: Muon-style orthogonalization chooses the
+  matrix-shaped direction; the controller chooses the global multiplier.
+
+For a detailed transfer note for another machine or coding agent, read
+`PROJECT_HANDOFF.md`.
+
+Project memory is split across three documents:
+
+- `CONVERSATION_LOG.md` preserves the nuanced discussion history.
+- `DEVELOPMENT_LOG.md` records the chronological engineering and benchmark
+  timeline.
+- `PROJECT_HANDOFF.md` summarizes the current state and next steps for another
+  machine or coding agent.
 
 ---
 
@@ -171,11 +194,13 @@ actual-versus-predicted decrease idea as an outer-loop controller around Adam.
 Adam supplies the preconditioned direction, while the controller adapts the
 global step multiplier.
 
-The subproject includes a PyTorch neural-network comparison on MNIST:
-vanilla Adam versus controlled Adam. Run it from `controlled_adam_project/`:
+The subproject includes 2D function benchmarks and PyTorch neural-network
+comparisons on MNIST, Fashion-MNIST, and CIFAR-10. Run it from
+`controlled_adam_project/`:
 
 ```bash
-python examples/run_mnist_demo.py --download
+PYTHONPATH=src python examples/run_demo.py
+PYTHONPATH=src python examples/run_mnist_demo.py --dataset fashion_mnist --download --ablation
 ```
 
 For minibatch training, the control ratio evaluates the trial loss on the
@@ -197,3 +222,21 @@ signal.
 
 If MNIST is unavailable locally and download is disabled, the script falls back
 to `sklearn.datasets.load_digits` for offline smoke testing.
+
+## Related subproject: controlled Muon
+
+The workspace also contains `controlled_muon_project/`, which mirrors the Adam
+subproject but uses Muon-style orthogonalized update directions. It supports the
+same 2D function benchmark suite and the same MNIST, Fashion-MNIST, and CIFAR-10
+image benchmark interface.
+
+Run it from `controlled_muon_project/`:
+
+```bash
+PYTHONPATH=src python examples/run_matrix_quadratic_demo.py
+PYTHONPATH=src python examples/run_mnist_demo.py --dataset fashion_mnist --download --ablation
+```
+
+The current PyTorch Muon implementation is intentionally educational and uses
+CPU/NumPy orthogonalization, so CIFAR-10 runs are slower than the Adam runs.
+Add progress logging before running larger experiments.
