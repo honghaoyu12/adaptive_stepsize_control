@@ -1,6 +1,6 @@
 # Conversation Log
 
-Last updated: 2026-05-20
+Last updated: 2026-05-22
 
 Current handoff note: see `PROJECT_HANDOFF.md` first. For a concise
 chronological engineering timeline, see `DEVELOPMENT_LOG.md`. This file remains
@@ -31,6 +31,49 @@ The workspace contains three related Python projects:
    - Muon-style orthogonalization supplies matrix-shaped directions.
    - Supports the same function benchmark suite plus MNIST, Fashion-MNIST, and
      CIFAR-10 image benchmarks.
+
+Recent Adam CIFAR-10 tuning context:
+
+- Conservative run (`alpha_max=1.25e-3`) was stable but slightly too cautious.
+- Balanced run (`alpha_max=1.5e-3`) gave the best controlled result so far,
+  with `controlled_raw_rho` reaching `0.8232` best test accuracy on a 20k/5k
+  CIFAR-10 subset for 20 epochs.
+- A follow-up balanced run with `rho_star=0.78` kept raw-rho strong but did not
+  improve beyond the best `0.8232` peak; it finished around `0.8214` final and
+  best test accuracy.
+- A faster-EMA run with `rho_beta=0.85` made EMA ramp sooner, but it did not
+  improve final performance: raw-rho again peaked at `0.8232`, EMA peaked at
+  `0.8164`, and EMA-trust peaked at `0.8114`.
+- More open run (`alpha_max=2e-3`) did not improve beyond that and made late
+  epochs less efficient.
+- Across these runs, raw-rho control outperformed the EMA variants on this
+  CIFAR setup; the trust hook did not materially change the result.
+- We then implemented `--model lenet_cifar` and ran the first architecture
+  transfer test. LeNet was fast, but the controller did not help:
+  vanilla/fixed Adam finished at `0.5868`, while controlled raw-rho, EMA, and
+  EMA-trust finished at `0.5656`, `0.5620`, and `0.5722`.
+- This led to a runtime discussion: CIFAR ResNet is likely much slower on the
+  current CPU setup, so it should start with a 3-epoch 5k/1k smoke run, then a
+  10-epoch 10k/2k medium run before any full 20-epoch ablation.
+- Given the runtime concern, Fashion-MNIST CNN is probably the cheaper next
+  architecture-variation test.
+- We followed that advice and ran a Fashion-MNIST CNN benchmark. Raw-rho
+  slightly beat fixed Adam-direction on final accuracy (`0.8870` vs `0.8866`),
+  while EMA and EMA-trust were close behind at `0.8844`. The run was fast
+  enough to be practical, around `4.5-5.6s` per epoch per variant.
+- This makes Fashion-MNIST CNN a better low-cost architecture-transfer signal
+  than LeNet, while CIFAR ResNet still looks like a staged experiment rather
+  than a default next run.
+- The five-seed Fashion-MNIST CNN follow-up showed that the single-seed raw-rho
+  edge did not hold: vanilla/fixed Adam averaged about `0.8945/0.8946` final
+  test accuracy, while controlled raw-rho averaged `0.8889`. Controlled variants
+  had about `1.22x-1.24x` relative wall-clock time.
+- We discussed better Fashion-MNIST CNN parameters. The current setting appears
+  too conservative because controlled variants ended near `alpha ~= 6.8e-4`,
+  below the Adam-scale `1e-3` baseline. The recommended next candidate is
+  `alpha_min=9e-4`, `alpha_max=1.5e-3`, `rho_star=0.75`, `rho_beta=0.90`,
+  `kp=0.02`, with factor clip `[0.98, 1.015]`.
+
 
 All projects use a `src/` layout, so commands should be run with
 `PYTHONPATH=src` unless the package is installed editable with `pip install -e .`.
@@ -1358,3 +1401,40 @@ Interpretation discussed:
   - add automatic best-epoch summaries;
   - consider validation-aware best-checkpoint reporting;
   - eventually run full CIFAR only with progress logging/checkpointing enabled.
+
+## Muon Multi-Seed Timing And Overhead Discussion
+
+The user asked for a 5-seed, 20-epoch Fashion-MNIST benchmark for the Muon
+variants. We ran the diagnostic on a 1024/512 subset with seeds 123, 456, 789,
+2024, and 2025:
+
+```text
+controlled_muon_project/outputs/fashion_mnist_muon_multiseed_20epoch_5seeds_1k
+```
+
+Aggregate result:
+
+```text
+vanilla_muon          final 0.6051 +/- 0.0181  best 0.6051 +/- 0.0181
+fixed_muon_direction final 0.6051 +/- 0.0181  best 0.6051 +/- 0.0181
+controlled_raw_rho   final 0.7289 +/- 0.0070  best 0.7289 +/- 0.0070
+controlled_ema       final 0.7293 +/- 0.0067  best 0.7293 +/- 0.0067
+controlled_ema_trust final 0.7293 +/- 0.0067  best 0.7293 +/- 0.0067
+```
+
+We then discussed whether the extra same-minibatch trial evaluation makes the
+controlled optimizer too expensive. The answer was nuanced:
+
+- The controlled variants add one extra forward loss evaluation after the trial
+  step on the same minibatch.
+- They do not add a second backward pass.
+- Since backward is usually more expensive than forward in deep learning, the
+  expected overhead is moderate rather than a full 2x.
+- This can be manageable in large training if the controller reaches a target
+  loss/accuracy in fewer steps.
+- It is still not free, so serious claims should compare loss and accuracy
+  versus wall-clock time, not only versus epochs or optimizer steps.
+
+On the small five-seed CPU diagnostic, elapsed times were noisy and comparable
+across vanilla and controlled Muon variants, so this run supports the idea that
+the overhead is manageable but is not a precise timing benchmark.

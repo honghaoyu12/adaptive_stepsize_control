@@ -75,6 +75,7 @@ adaptive_stepsize_control/
 ├── README.md
 ├── PROJECT_HANDOFF.md
 ├── CONVERSATION_LOG.md
+├── OPTIMIZER_VARIANTS_BENCHMARK_REPORT.md
 ├── requirements.txt
 ├── pyproject.toml
 ├── src/
@@ -104,13 +105,15 @@ optimizer directions:
 For a detailed transfer note for another machine or coding agent, read
 `PROJECT_HANDOFF.md`.
 
-Project memory is split across three documents:
+Project memory is split across four documents:
 
 - `CONVERSATION_LOG.md` preserves the nuanced discussion history.
 - `DEVELOPMENT_LOG.md` records the chronological engineering and benchmark
   timeline.
 - `PROJECT_HANDOFF.md` summarizes the current state and next steps for another
   machine or coding agent.
+- `OPTIMIZER_VARIANTS_BENCHMARK_REPORT.md` explains the five neural optimizer
+  variants and compares their benchmark performance.
 
 ---
 
@@ -204,13 +207,29 @@ PYTHONPATH=src python examples/run_mnist_demo.py --dataset fashion_mnist --downl
 ```
 
 The image benchmark runner supports long-run visibility with
-`--print-every N` and `--checkpoint-every N`. The latest larger CIFAR-10 Adam
-ablation used 20,000 train images and 5,000 test images for 40 epochs, with
-per-epoch checkpoints written under
-`controlled_adam_project/outputs/cifar10_20k_5k_40epochs_ablation_progress/`.
-On that run, final test accuracies were about `0.829` for vanilla Adam,
-`0.828` for fixed Adam-direction, and `0.828` for the EMA-controlled variants;
-the best peak was fixed Adam-direction at `0.840`.
+`--print-every N` and `--checkpoint-every N`.
+
+Recent CIFAR-10 Adam tuning runs on a 20k/5k subset showed a useful pattern:
+
+- conservative alpha caps around `1.25e-3` were stable but a bit too cautious;
+- a balanced cap around `1.5e-3` improved the raw-rho controller enough to
+  beat fixed Adam-direction on peak test accuracy;
+- a more open `2e-3` cap did not improve further and made the later epochs less
+  efficient.
+
+The best recent result came from the balanced raw-rho setting:
+
+- `controlled_raw_rho`: best test accuracy `0.8232`
+- `fixed_adam_direction`: best test accuracy `0.8220`
+- `vanilla_adam`: best test accuracy `0.8158`
+
+The current output folders that capture this tuning sequence are:
+
+- `controlled_adam_project/outputs/cifar10_20k_5k_20epochs_adam_conservative_rhostar82/`
+- `controlled_adam_project/outputs/cifar10_20k_5k_20epochs_adam_tuned_balanced_alpha15_rhostar80_beta90/`
+- `controlled_adam_project/outputs/cifar10_20k_5k_20epochs_adam_tuned_open_alpha20_rhostar78_beta90/`
+- `controlled_adam_project/outputs/cifar10_20k_5k_20epochs_adam_tuned_balanced_alpha15_rhostar78_beta90/`
+- `controlled_adam_project/outputs/cifar10_20k_5k_20epochs_adam_tuned_balanced_alpha15_rhostar80_beta85/`
 
 For minibatch training, the control ratio evaluates the trial loss on the
 **same minibatch** used to compute the gradient:
@@ -228,6 +247,14 @@ f_{B_t}(\theta_t) - f_{B_t}(\theta_t + \alpha_t p_t)
 Using a different minibatch for the after-step loss would mix real optimization
 progress with random minibatch variation, so it would not be a reliable control
 signal.
+
+This same-minibatch trial evaluation adds one extra forward loss evaluation per
+controlled optimizer step, but not an extra backward pass. Since backpropagation
+is usually the dominant cost in neural-network training, the overhead is
+expected to be moderate rather than a full doubling of training time. The fair
+comparison is still accuracy/loss versus wall-clock time, because the extra
+forward pass, data pipeline, model architecture, and hardware utilization can
+change the practical cost.
 
 If MNIST is unavailable locally and download is disabled, the script falls back
 to `sklearn.datasets.load_digits` for offline smoke testing.

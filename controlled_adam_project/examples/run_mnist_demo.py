@@ -43,6 +43,31 @@ class SmallMLP(nn.Module):
         return self.net(x)
 
 
+class FashionCNN(nn.Module):
+    """Small convolutional classifier for 28x28 grayscale images."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(1, 16, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2),
+            nn.Conv2d(16, 32, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2),
+        )
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(32 * 7 * 7, 128),
+            nn.ReLU(),
+            nn.Linear(128, 10),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.features(x)
+        return self.classifier(x)
+
+
 class SmallCIFARCNN(nn.Module):
     """Batch-normalized convolutional classifier for CIFAR-10 RGB images."""
 
@@ -83,6 +108,30 @@ class SmallCIFARCNN(nn.Module):
         return self.classifier(x)
 
 
+class LeNetCIFAR(nn.Module):
+    """Classic LeNet-style CIFAR-10 classifier."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(3, 6, kernel_size=5),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            nn.Conv2d(6, 16, kernel_size=5),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            nn.Flatten(),
+            nn.Linear(16 * 5 * 5, 120),
+            nn.ReLU(),
+            nn.Linear(120, 84),
+            nn.ReLU(),
+            nn.Linear(84, 10),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
+
 def make_model(model_name: str, dataset_name: str) -> nn.Module:
     """Build a classifier compatible with the resolved dataset."""
     if model_name == "auto":
@@ -91,10 +140,18 @@ def make_model(model_name: str, dataset_name: str) -> nn.Module:
         if dataset_name == "cifar10":
             raise ValueError("The MLP model expects 28x28 grayscale inputs, not CIFAR-10.")
         return SmallMLP()
+    if model_name == "fashion_cnn":
+        if dataset_name not in {"mnist", "fashion_mnist", "sklearn_digits"}:
+            raise ValueError("The Fashion CNN model expects 28x28 grayscale inputs.")
+        return FashionCNN()
     if model_name == "cnn":
         if dataset_name != "cifar10":
             raise ValueError("The CNN model is currently configured for CIFAR-10 RGB inputs.")
         return SmallCIFARCNN()
+    if model_name == "lenet_cifar":
+        if dataset_name != "cifar10":
+            raise ValueError("The LeNet CIFAR model is currently configured for CIFAR-10 RGB inputs.")
+        return LeNetCIFAR()
     raise ValueError(f"Unknown model: {model_name}")
 
 
@@ -107,6 +164,8 @@ class EpochMetrics:
     train_accuracy: float
     test_loss: float
     test_accuracy: float
+    elapsed_seconds: float = 0.0
+    optimizer_steps: int = 0
     mean_alpha: float | None = None
     mean_rho: float | None = None
     accepted_rate: float | None = None
@@ -440,7 +499,8 @@ def format_epoch_metrics(
         f"[{run_name}] epoch {row.epoch}: "
         f"train_loss={row.train_loss:.4f}, train_acc={row.train_accuracy:.4f}, "
         f"test_loss={row.test_loss:.4f}, test_acc={row.test_accuracy:.4f}, "
-        f"elapsed={elapsed_seconds:.1f}s"
+        f"epoch_elapsed={elapsed_seconds:.1f}s, "
+        f"total_elapsed={row.elapsed_seconds:.1f}s, steps={row.optimizer_steps}"
     )
     if row.mean_alpha is not None:
         message += (
@@ -509,6 +569,8 @@ def train_vanilla_adam(
     """Train a model with PyTorch Adam."""
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     metrics = []
+    run_start_time = time.perf_counter()
+    optimizer_steps = 0
 
     for epoch in range(1, epochs + 1):
         start_time = time.perf_counter()
@@ -521,13 +583,22 @@ def train_vanilla_adam(
             loss = criterion(model(x), y)
             loss.backward()
             optimizer.step()
+            optimizer_steps += 1
 
         train_loss, train_accuracy = evaluate(model, eval_train_loader, criterion, device)
         test_loss, test_accuracy = evaluate(model, test_loader, criterion, device)
-        metrics.append(
-            EpochMetrics(epoch, train_loss, train_accuracy, test_loss, test_accuracy)
-        )
         elapsed = time.perf_counter() - start_time
+        metrics.append(
+            EpochMetrics(
+                epoch=epoch,
+                train_loss=train_loss,
+                train_accuracy=train_accuracy,
+                test_loss=test_loss,
+                test_accuracy=test_accuracy,
+                elapsed_seconds=time.perf_counter() - run_start_time,
+                optimizer_steps=optimizer_steps,
+            )
+        )
         maybe_print_epoch(run_name, metrics[-1], elapsed, checkpoint)
         maybe_save_checkpoint(
             run_name,
@@ -588,6 +659,8 @@ def train_controlled_adam(
     )
     metrics = []
     step_logs = []
+    run_start_time = time.perf_counter()
+    optimizer_steps = 0
 
     for epoch in range(1, epochs + 1):
         start_time = time.perf_counter()
@@ -609,10 +682,12 @@ def train_controlled_adam(
             step_log = optimizer.step(loss_before, same_batch_loss)
             step_logs.append(step_log)
             epoch_logs.append(step_log)
+            optimizer_steps += 1
 
         train_loss, train_accuracy = evaluate(model, eval_train_loader, criterion, device)
         test_loss, test_accuracy = evaluate(model, test_loader, criterion, device)
         finite_rhos = [log.rho for log in epoch_logs if np.isfinite(log.rho)]
+        elapsed = time.perf_counter() - start_time
         metrics.append(
             EpochMetrics(
                 epoch=epoch,
@@ -620,12 +695,13 @@ def train_controlled_adam(
                 train_accuracy=train_accuracy,
                 test_loss=test_loss,
                 test_accuracy=test_accuracy,
+                elapsed_seconds=time.perf_counter() - run_start_time,
+                optimizer_steps=optimizer_steps,
                 mean_alpha=float(np.mean([log.alpha for log in epoch_logs])),
                 mean_rho=float(np.mean(finite_rhos)) if finite_rhos else float("nan"),
                 accepted_rate=float(np.mean([log.accepted for log in epoch_logs])),
             )
         )
-        elapsed = time.perf_counter() - start_time
         maybe_print_epoch(run_name, metrics[-1], elapsed, checkpoint)
         maybe_save_checkpoint(
             run_name,
@@ -660,6 +736,8 @@ def save_epoch_metrics(
                 "train_accuracy",
                 "test_loss",
                 "test_accuracy",
+                "elapsed_seconds",
+                "optimizer_steps",
                 "mean_alpha",
                 "mean_rho",
                 "accepted_rate",
@@ -675,6 +753,8 @@ def save_epoch_metrics(
                         row.train_accuracy,
                         row.test_loss,
                         row.test_accuracy,
+                        row.elapsed_seconds,
+                        row.optimizer_steps,
                         "" if row.mean_alpha is None else row.mean_alpha,
                         "" if row.mean_rho is None else row.mean_rho,
                         "" if row.accepted_rate is None else row.accepted_rate,
@@ -849,6 +929,15 @@ def save_run_metadata(
             "criterion": "CrossEntropyLoss",
             "eval_train_transform_is_deterministic": dataset_name == "cifar10",
             "epoch_seed_rule": "set_seed(seed + epoch) for each optimizer variant",
+            "epoch_metrics_include": [
+                "epoch",
+                "elapsed_seconds",
+                "optimizer_steps",
+                "train_loss",
+                "train_accuracy",
+                "test_loss",
+                "test_accuracy",
+            ],
             "checkpoint_every": args.checkpoint_every,
             "print_every": args.print_every,
         },
@@ -934,6 +1023,24 @@ def plot_metrics(
     plt.savefig(output_dir / f"{dataset_name}_accuracy.png", dpi=160)
     plt.close()
 
+    plot_metric_by_axis(
+        output_dir,
+        dataset_name,
+        runs,
+        axis_attr="optimizer_steps",
+        axis_label="Optimizer steps",
+        axis_slug="steps",
+    )
+    if all(any(row.elapsed_seconds > 0.0 for row in run.metrics) for run in runs):
+        plot_metric_by_axis(
+            output_dir,
+            dataset_name,
+            runs,
+            axis_attr="elapsed_seconds",
+            axis_label="Wall-clock seconds",
+            axis_slug="time",
+        )
+
     runs_with_steps = [run for run in runs if run.step_logs]
     if runs_with_steps:
         plt.figure(figsize=(7, 4))
@@ -981,6 +1088,58 @@ def plot_metrics(
         plt.close()
 
 
+def plot_metric_by_axis(
+    output_dir: Path,
+    dataset_name: str,
+    runs: list[OptimizerRun],
+    *,
+    axis_attr: str,
+    axis_label: str,
+    axis_slug: str,
+) -> None:
+    """Save loss and accuracy plots against a non-epoch x-axis."""
+    series = [(run, [float(getattr(row, axis_attr)) for row in run.metrics]) for run in runs]
+    if not all(any(value > 0.0 for value in values) for _, values in series):
+        return
+
+    metric_specs = [
+        ("test_loss", "Test cross-entropy", "loss"),
+        ("train_loss", "Train cross-entropy", "train_loss"),
+        ("test_accuracy", "Test accuracy", "accuracy"),
+    ]
+    for metric_attr, ylabel, metric_slug in metric_specs:
+        plt.figure(figsize=(7, 4))
+        for run, x_values in series:
+            plt.plot(x_values, [getattr(row, metric_attr) for row in run.metrics], label=run.name)
+        plt.xlabel(axis_label)
+        plt.ylabel(ylabel)
+        plt.title(f"{dataset_name} {ylabel.lower()} vs {axis_label.lower()}")
+        plt.grid(True)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(output_dir / f"{dataset_name}_{metric_slug}_vs_{axis_slug}.png", dpi=160)
+        plt.close()
+
+    plt.figure(figsize=(8, 4.5))
+    for run, x_values in series:
+        line = plt.plot(x_values, [row.test_loss for row in run.metrics], label=f"{run.name} test")[0]
+        plt.plot(
+            x_values,
+            [row.train_loss for row in run.metrics],
+            linestyle="--",
+            color=line.get_color(),
+            label=f"{run.name} train",
+        )
+    plt.xlabel(axis_label)
+    plt.ylabel("Cross-entropy")
+    plt.title(f"{dataset_name} train vs test loss vs {axis_label.lower()}")
+    plt.grid(True)
+    plt.legend(fontsize=8, ncol=2)
+    plt.tight_layout()
+    plt.savefig(output_dir / f"{dataset_name}_train_test_loss_vs_{axis_slug}.png", dpi=160)
+    plt.close()
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -990,7 +1149,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--model",
-        choices=["auto", "mlp", "cnn"],
+        choices=["auto", "mlp", "cnn", "lenet_cifar", "fashion_cnn"],
         default="auto",
         help="Classifier architecture. Auto uses CNN for CIFAR-10 and MLP otherwise.",
     )

@@ -1,6 +1,6 @@
 # Development Log
 
-Last updated: 2026-05-20
+Last updated: 2026-05-22
 
 This is the chronological engineering log for `adaptive_stepsize_control`.
 
@@ -167,12 +167,15 @@ Added metadata output:
 
 These include dataset, transforms, model architecture, parameter count, optimizer settings, seed, device, and training configuration.
 
-The neural benchmark epoch metrics CSV records both training and test loss.
+The neural benchmark epoch metrics CSV records training loss, test loss,
+cumulative wall-clock seconds, and cumulative optimizer steps.
 The plotting code now writes:
 
 - `*_loss.png` for test/validation loss
 - `*_train_loss.png` for training loss
 - `*_train_test_loss.png` for overlaid train/test loss
+- `*_loss_vs_steps.png` and `*_accuracy_vs_steps.png`
+- `*_loss_vs_time.png` and `*_accuracy_vs_time.png`
 
 Verification:
 
@@ -186,6 +189,132 @@ Latest known result:
 ```text
 9 passed
 ```
+
+Recent CIFAR-10 Adam tuning sequence:
+
+1. Conservative cap run on 20k/5k CIFAR-10 for 20 epochs:
+   - `alpha_max=1.25e-3`
+   - `rho_star=0.82`
+   - `rho_beta=0.95`
+   - Result: stable, but a bit too cautious.
+   - Best controlled result: `controlled_raw_rho` at `0.8164`
+   - Fixed Adam-direction baseline: `0.8220`
+
+2. Balanced cap run:
+   - `alpha_max=1.5e-3`
+   - `rho_star=0.80`
+   - `rho_beta=0.90`
+   - Result: best raw-rho peak improved to `0.8232`, slightly above fixed Adam-direction.
+
+3. Open cap run:
+   - `alpha_max=2e-3`
+   - `rho_star=0.78`
+   - `rho_beta=0.90`
+   - Result: did not improve further; later epochs became less efficient.
+
+4. Follow-up balanced run:
+   - `alpha_max=1.5e-3`
+   - `rho_star=0.78`
+   - `rho_beta=0.90`
+   - Result: `controlled_raw_rho` reached `0.8214` final test accuracy and
+     `0.8214` best test accuracy at epoch 20.
+
+5. Faster-EMA balanced run:
+   - `alpha_max=1.5e-3`
+   - `rho_star=0.80`
+   - `rho_beta=0.85`
+   - Result: raw-rho reproduced the earlier `0.8232` best test accuracy, but
+     final raw-rho was `0.8138`; EMA reached `0.8110` final / `0.8164` best,
+     and EMA-trust reached `0.8094` final / `0.8114` best.
+
+Conclusion:
+
+- Raw-rho control benefited most from opening the cap modestly.
+- EMA variants remained stable but lagged raw-rho on this CIFAR setting.
+- The trust-region expansion hook did not materially change the tuned CIFAR runs.
+- The best current 20-epoch 20k/5k CIFAR setting remains the balanced
+  `alpha_max=1.5e-3`, `rho_star=0.80`, `rho_beta=0.90` raw-rho run by peak
+  test accuracy.
+
+Architecture-transfer follow-up:
+
+- Added `LeNetCIFAR` model support in `controlled_adam_project/examples/run_mnist_demo.py`
+  via `--model lenet_cifar`.
+- Ran 20-epoch CIFAR-10, 20k/5k, LeNet-style ablation with the balanced Adam
+  controller setting.
+- Final test accuracy:
+
+```text
+vanilla_adam          0.5868
+fixed_adam_direction 0.5868
+controlled_raw_rho   0.5656
+controlled_ema       0.5620
+controlled_ema_trust 0.5722
+```
+
+Interpretation:
+
+- LeNet was much faster than `SmallCIFARCNN`, about `6-7s` per epoch per
+  variant.
+- The controller mostly stayed near the alpha floor and did not improve this
+  weaker architecture.
+- The current balanced controller setting does not appear architecture-agnostic.
+- A CIFAR ResNet run should start with a small smoke test because a full
+  20-epoch, 5-variant ablation may take many hours on the current CPU setup.
+- A Fashion-MNIST CNN is likely the cheaper next architecture-variation test.
+
+Fashion-MNIST CNN benchmark:
+
+- Added `FashionCNN` model support in `controlled_adam_project/examples/run_mnist_demo.py`
+  via `--model fashion_cnn`.
+- A single 20-epoch, 20k/5k Fashion-MNIST CNN run gave a tiny raw-rho edge:
+
+```text
+vanilla_adam          0.8858
+fixed_adam_direction 0.8866
+controlled_raw_rho   0.8870
+controlled_ema       0.8844
+controlled_ema_trust 0.8844
+```
+
+- A five-seed follow-up showed that the single-seed edge did not hold:
+
+```text
+vanilla_adam          0.8945 +/- 0.0061 final, 0.8962 +/- 0.0041 best
+fixed_adam_direction 0.8946 +/- 0.0062 final, 0.8962 +/- 0.0045 best
+controlled_raw_rho   0.8889 +/- 0.0071 final, 0.8918 +/- 0.0047 best
+controlled_ema       0.8872 +/- 0.0064 final, 0.8912 +/- 0.0038 best
+controlled_ema_trust 0.8884 +/- 0.0064 final, 0.8909 +/- 0.0034 best
+```
+
+Interpretation:
+
+- Fashion-MNIST CNN is a cheap and useful architecture-transfer testbed.
+- The current CIFAR-derived balanced controller setting is too conservative
+  for this model: controlled variants ended near `alpha ~= 6.8e-4`, below the
+  Adam-scale `1e-3` baseline.
+- Controlled variants also had `1.22x-1.24x` relative wall-clock time, so the
+  underperformance is not offset by speed.
+
+Recommended Fashion-MNIST CNN parameter candidates:
+
+```text
+Candidate A:
+alpha_min=9e-4, alpha_max=1.5e-3, rho_star=0.75, rho_beta=0.90,
+kp=0.02, min_alpha_factor=0.98, max_alpha_factor=1.015
+
+Candidate B:
+alpha_min=8e-4, alpha_max=1.5e-3, rho_star=0.70, rho_beta=0.90,
+kp=0.03, min_alpha_factor=0.98, max_alpha_factor=1.02
+
+Candidate C:
+alpha_min=9.5e-4, alpha_max=1.25e-3, rho_star=0.75, rho_beta=0.90,
+kp=0.01, min_alpha_factor=0.995, max_alpha_factor=1.005
+```
+
+Candidate A is the recommended next run because it directly tests whether
+preventing alpha from drifting below Adam scale fixes the Fashion-MNIST CNN
+underperformance.
 
 ## 4. Fashion-MNIST Adam Experiments
 
@@ -523,6 +652,43 @@ Interpretation:
 - Controlled Muon was clearly better than fixed/vanilla Muon on this Fashion-MNIST subset.
 - Raw rho had the best final and peak accuracy in this run.
 - EMA and EMA-trust were identical in this run.
+
+Additional multi-seed diagnostic:
+
+```bash
+cd controlled_muon_project
+for seed in 123 456 789 2024 2025; do
+  MPLCONFIGDIR=/private/tmp PYTHONPATH=src python examples/run_mnist_demo.py \
+    --dataset fashion_mnist \
+    --fashion-folder ../fashion \
+    --epochs 20 \
+    --train-subset 1024 \
+    --test-subset 512 \
+    --batch-size 128 \
+    --lr 1e-3 \
+    --seed "$seed" \
+    --ablation \
+    --print-every 10 \
+    --output-dir "outputs/fashion_mnist_muon_multiseed_20epoch_5seeds_1k/seed_${seed}"
+done
+```
+
+Aggregate result:
+
+```text
+vanilla_muon          final 0.6051 +/- 0.0181  best 0.6051 +/- 0.0181
+fixed_muon_direction final 0.6051 +/- 0.0181  best 0.6051 +/- 0.0181
+controlled_raw_rho   final 0.7289 +/- 0.0070  best 0.7289 +/- 0.0070
+controlled_ema       final 0.7293 +/- 0.0067  best 0.7293 +/- 0.0067
+controlled_ema_trust final 0.7293 +/- 0.0067  best 0.7293 +/- 0.0067
+```
+
+Timing interpretation:
+
+- Controlled variants add one same-minibatch forward loss evaluation per optimizer step.
+- They do not add an extra backward pass, so the theoretical overhead is usually moderate rather than a full 2x.
+- On this small five-seed CPU run, elapsed times were noisy but comparable to vanilla Muon.
+- Larger claims should compare loss and accuracy versus wall-clock time, not only epochs or optimizer steps.
 
 ## 9. CIFAR-10 Muon Benchmarks
 

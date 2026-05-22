@@ -377,13 +377,19 @@ outputs/mnist/mnist_loss.png
 outputs/mnist/mnist_train_loss.png
 outputs/mnist/mnist_train_test_loss.png
 outputs/mnist/mnist_accuracy.png
+outputs/mnist/mnist_loss_vs_steps.png
+outputs/mnist/mnist_accuracy_vs_steps.png
+outputs/mnist/mnist_loss_vs_time.png
+outputs/mnist/mnist_accuracy_vs_time.png
 outputs/mnist/mnist_controlled_alpha.png
 outputs/mnist/mnist_controlled_rho.png
 ```
 
-The epoch metrics CSV records both training and test loss. The default loss
-plot remains the test/validation loss plot, while `*_train_loss.png` and
-`*_train_test_loss.png` show the training-loss view explicitly.
+The epoch metrics CSV records training loss, test loss, cumulative wall-clock
+seconds, and cumulative optimizer steps. The default loss plot remains the
+test/validation loss plot, while `*_train_loss.png` and `*_train_test_loss.png`
+show the training-loss view explicitly. New runs also write `*_vs_steps.png`
+and `*_vs_time.png` plots for loss and accuracy.
 
 The controlled optimizer implementation lives in
 `src/controlled_adam/torch_optimizers.py` as `TorchControlledAdam`.
@@ -413,6 +419,9 @@ python examples/run_mnist_demo.py \
 ```
 
 `--model auto` uses the MLP for MNIST/Fashion-MNIST and the CNN for CIFAR-10.
+`--model lenet_cifar` selects a classic LeNet-style CIFAR-10 CNN:
+`Conv2d(3->6, 5x5) -> ReLU -> MaxPool -> Conv2d(6->16, 5x5) -> ReLU ->
+MaxPool -> Linear(400->120) -> Linear(120->84) -> Linear(84->10)`.
 If CIFAR-10 is already extracted under `data/`, `--download` is not required.
 For CIFAR-10, training uses random augmentation while train/test metrics use
 deterministic normalized evaluation transforms on the same subset indices.
@@ -442,17 +451,44 @@ Recent CIFAR-10 observations:
   produced the best CIFAR final result so far on the 5000/1000 subset:
   `controlled_ema_trust` reached `0.731` final test accuracy, compared with
   `0.718` for vanilla Adam and `0.717` for fixed Adam-direction.
-- A larger 40-epoch CIFAR-10 run with 20,000 train images and 5,000 test images
-  was run with per-epoch printing and checkpoints:
-  `outputs/cifar10_20k_5k_40epochs_ablation_progress`. On the larger subset,
-  final test accuracies were `0.8288` for vanilla Adam, `0.8280` for fixed
-  Adam-direction, `0.8232` for raw-rho control, and `0.8278` for both EMA
-  control variants. Best test accuracies were `0.8344` for vanilla Adam,
-  `0.8402` for fixed Adam-direction, `0.8292` for raw-rho control, and
-  `0.8324` for both EMA variants.
-- In the larger 20k/5k run, all controlled variants accepted 100% of steps and
-  quickly saturated the `1.5e-3` alpha cap. The trust-region EMA variant matched
-  plain EMA, so this setting did not exercise a distinct trust-region behavior.
+- A conservative 20-epoch CIFAR-10 Adam run on 20,000 train images and 5,000
+  test images used `alpha_max=1.25e-3`, `rho_star=0.82`, and `rho_beta=0.95`.
+  That run was stable but slightly too cautious: the best controlled result was
+  `controlled_raw_rho` at `0.8164`, while fixed Adam-direction reached `0.8220`.
+- A balanced follow-up run opened the cap to `1.5e-3` and lowered the target to
+  `rho_star=0.80` with `rho_beta=0.90`. That improved raw-rho enough to edge
+  out fixed Adam-direction on peak accuracy: `controlled_raw_rho` reached
+  `0.8232` best test accuracy.
+- A more open run with `alpha_max=2e-3` and `rho_star=0.78` did not improve
+  further. Raw-rho stayed stable but did not beat the balanced run, and the
+  EMA variants were also stable but remained behind raw-rho.
+- A follow-up balanced run with `alpha_max=1.5e-3`, `rho_star=0.78`, and
+  `rho_beta=0.90` kept raw-rho strong but did not beat the previous peak:
+  `controlled_raw_rho` reached `0.8214` final and best test accuracy.
+- A faster-EMA run with `alpha_max=1.5e-3`, `rho_star=0.80`, and
+  `rho_beta=0.85` made the EMA controller ramp earlier, but did not improve
+  the recommendation. Raw-rho again peaked at `0.8232`, while EMA peaked at
+  `0.8164` and EMA-trust peaked at `0.8114`.
+- The first architecture-transfer test used `--model lenet_cifar` on CIFAR-10
+  20k/5k for 20 epochs with the balanced controller setting. LeNet was much
+  faster than `SmallCIFARCNN`, around `6-7s` per epoch per variant, but the
+  controller underperformed: vanilla/fixed Adam finished at `0.5868`, while
+  raw-rho, EMA, and EMA-trust finished at `0.5656`, `0.5620`, and `0.5722`.
+- A Fashion-MNIST CNN run with `--model fashion_cnn` on 20k/5k for 20 epochs
+  was fast enough to be practical and gave a small positive signal: raw-rho
+  reached `0.8870` final test accuracy versus `0.8866` for fixed Adam-direction.
+  EMA and EMA-trust were close behind at `0.8844`.
+- The five-seed Fashion-MNIST CNN follow-up showed that this edge was not
+  reliable: vanilla/fixed Adam averaged `0.8945/0.8946` final test accuracy,
+  while controlled raw-rho averaged `0.8889`; controlled variants had about
+  `1.22x-1.24x` relative wall-clock time.
+- The next Fashion-MNIST CNN tuning pass should test whether the controller is
+  simply too conservative. Recommended first candidate: `alpha_min=9e-4`,
+  `alpha_max=1.5e-3`, `rho_star=0.75`, `rho_beta=0.90`, `kp=0.02`,
+  `min_alpha_factor=0.98`, and `max_alpha_factor=1.015`.
+- In all of these 20k/5k runs, the controlled variants accepted essentially all
+  steps and never needed backtracking, so the controller behaved more like a
+  smooth alpha governor than a strict gate.
 - Each benchmark output directory now includes `run_metadata.json` and
   `run_metadata.txt` with the dataset, transforms, model architecture,
   trainable parameter count, optimizer variants, and controller hyperparameters.

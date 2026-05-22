@@ -1,6 +1,6 @@
 # Project Handoff: Adaptive Step-Size Control
 
-Last updated: 2026-05-20
+Last updated: 2026-05-22
 
 This document is for a future coding agent taking over the workspace. It is intentionally comprehensive and operational: it explains what the project is, what has been implemented, how to run it, what benchmark results are already known, and what caveats matter.
 
@@ -8,6 +8,7 @@ Related project-memory documents:
 
 - `CONVERSATION_LOG.md`: nuanced discussion history and interpretation.
 - `DEVELOPMENT_LOG.md`: chronological engineering and benchmark timeline.
+- `OPTIMIZER_VARIANTS_BENCHMARK_REPORT.md`: comprehensive five-variant optimizer comparison and benchmark interpretation.
 - `PROJECT_HANDOFF.md`: current-state operating manual.
 
 ## High-Level Goal
@@ -91,6 +92,91 @@ After the documentation commit, the Adam CIFAR runner was updated with
 per-epoch progress printing and checkpointing, and a larger 20k/5k CIFAR-10
 ablation was run. Those changes may be uncommitted depending on when this
 handoff is read.
+
+Since then, several CIFAR-10 Adam tuning sweeps were completed:
+
+- balanced cap run:
+  - `alpha_max=1.5e-3`
+  - `rho_star=0.80`
+  - `rho_beta=0.90`
+  - best controlled raw-rho test accuracy: `0.8232`
+- open cap run:
+  - `alpha_max=2e-3`
+  - `rho_star=0.78`
+  - `rho_beta=0.90`
+  - best controlled raw-rho test accuracy: `0.8154`
+
+- follow-up balanced run:
+  - `alpha_max=1.5e-3`
+  - `rho_star=0.78`
+  - `rho_beta=0.90`
+  - final/best controlled raw-rho test accuracy: `0.8214`
+
+- faster-EMA balanced run:
+  - `alpha_max=1.5e-3`
+  - `rho_star=0.80`
+  - `rho_beta=0.85`
+  - raw-rho best test accuracy: `0.8232`
+  - EMA best test accuracy: `0.8164`
+  - EMA-trust best test accuracy: `0.8114`
+
+Interpretation:
+
+- the controller was too conservative at `1.25e-3`;
+- `1.5e-3` appears to be a better operating point for raw-rho on this CIFAR
+  subset;
+- `2e-3` was too open and did not improve further;
+- EMA variants were stable but behind raw-rho on these runs.
+- lowering `rho_beta` to `0.85` made EMA more responsive but did not improve
+  the final recommendation.
+
+Architecture-transfer follow-up:
+
+- Added `--model lenet_cifar` to the Adam CIFAR runner.
+- Ran a 20-epoch 20k/5k CIFAR-10 LeNet-style ablation with the balanced
+  controller settings.
+- Final test accuracy:
+
+```text
+vanilla_adam          0.5868
+fixed_adam_direction 0.5868
+controlled_raw_rho   0.5656
+controlled_ema       0.5620
+controlled_ema_trust 0.5722
+```
+
+Interpretation:
+
+- LeNet was fast, about `6-7s` per epoch per variant, but the controller
+  underperformed the vanilla/fixed baselines.
+- This weakens the hypothesis that the current controller setting transfers
+  automatically across architectures.
+- A CIFAR ResNet test should be staged carefully on this CPU machine: first a
+  3-epoch 5k/1k smoke run, then a 10-epoch 10k/2k medium run, and only then a
+  larger run if the timing and early signal look useful.
+- A Fashion-MNIST CNN test is probably the cheaper next architecture variation.
+- We then ran the Fashion-MNIST CNN benchmark. Raw-rho slightly beat fixed
+  Adam-direction on final test accuracy (`0.8870` vs `0.8866`), and the run
+  was fast enough to be practical on the current CPU (`4.5-5.6s` per epoch per
+  variant).
+- This makes Fashion-MNIST CNN a good low-cost architecture-transfer check.
+- The five-seed Fashion-MNIST CNN follow-up showed that the single-seed raw-rho
+  edge did not hold: vanilla/fixed Adam averaged about `0.8945/0.8946` final
+  test accuracy, while controlled raw-rho averaged `0.8889`. Controlled variants
+  had about `1.22x-1.24x` relative wall-clock time.
+- Recommended next Fashion-MNIST CNN parameter candidates:
+  - Candidate A: `alpha_min=9e-4`, `alpha_max=1.5e-3`, `rho_star=0.75`,
+    `rho_beta=0.90`, `kp=0.02`, factor clip `[0.98, 1.015]`.
+  - Candidate B: `alpha_min=8e-4`, `alpha_max=1.5e-3`, `rho_star=0.70`,
+    `rho_beta=0.90`, `kp=0.03`, factor clip `[0.98, 1.02]`.
+  - Candidate C: `alpha_min=9.5e-4`, `alpha_max=1.25e-3`, `rho_star=0.75`,
+    `rho_beta=0.90`, `kp=0.01`, factor clip `[0.995, 1.005]`.
+- Candidate A is the recommended next run because it directly tests whether
+  preventing alpha from drifting below Adam scale fixes the Fashion-MNIST CNN
+  underperformance.
+
+- CIFAR ResNet should still be staged carefully with a smoke run before any
+  large ablation.
 
 There are also two user-provided/untracked comparison files at repo root:
 
@@ -306,12 +392,14 @@ The runner writes:
 
 - `run_metadata.json`
 - `run_metadata.txt`
-- epoch metrics CSV with train loss, train accuracy, test loss, and test accuracy
+- epoch metrics CSV with train loss, train accuracy, test loss, test accuracy, cumulative wall-clock seconds, and cumulative optimizer steps
 - step diagnostics CSVs
 - test loss plot
 - train loss plot
 - train-vs-test loss plot
 - accuracy plot
+- loss/accuracy plots versus optimizer steps
+- loss/accuracy plots versus wall-clock time
 - controlled alpha plot
 - controlled rho plot
 - optional per-epoch checkpoints when `--checkpoint-every N` is set
@@ -708,6 +796,10 @@ On another machine, either copy this folder or run the Adam/Muon runner with `--
 
 1. Same-minibatch trial loss is mandatory.
    Do not change controlled Adam/Muon to evaluate `f(theta_{t+1})` on a fresh minibatch.
+   The controlled variants intentionally add one extra forward loss evaluation
+   on that same minibatch, but not an extra backward pass. Treat overhead claims
+   through loss/accuracy versus wall-clock time, because the practical cost
+   depends on the model, hardware, and data pipeline.
 
 2. CIFAR Muon is slow.
    The current PyTorch Muon implementation orthogonalizes tensors through NumPy/CPU. It is acceptable for research demos but not efficient. Add progress logging before running more long Muon jobs.

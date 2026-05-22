@@ -120,14 +120,33 @@ Muon baselines. The CIFAR-10 run is slow because the current implementation
 does CPU/NumPy orthogonalization and evaluates same-minibatch trial losses for
 controlled variants.
 
+Fashion-MNIST, 20 epochs, five seeds, 1024 train / 512 test:
+
+| Optimizer | Final test acc mean +/- std | Best test acc mean +/- std |
+|---|---:|---:|
+| `vanilla_muon` | `0.6051 +/- 0.0181` | `0.6051 +/- 0.0181` |
+| `fixed_muon_direction` | `0.6051 +/- 0.0181` | `0.6051 +/- 0.0181` |
+| `controlled_raw_rho` | `0.7289 +/- 0.0070` | `0.7289 +/- 0.0070` |
+| `controlled_ema` | `0.7293 +/- 0.0067` | `0.7293 +/- 0.0067` |
+| `controlled_ema_trust` | `0.7293 +/- 0.0067` | `0.7293 +/- 0.0067` |
+
+This five-seed diagnostic run is saved under
+`outputs/fashion_mnist_muon_multiseed_20epoch_5seeds_1k/`. It also records
+elapsed seconds. On this small CPU run, the controlled variants had comparable
+wall-clock time to vanilla Muon, though the timing is noisy. Conceptually, the
+controller adds one extra same-minibatch forward pass but not an extra backward
+pass, so the overhead should usually be much less than doubling the training
+cost. Larger claims should use loss/accuracy versus wall-clock time.
+
 ## Outputs
 
 The runner writes:
 
-- epoch metrics CSV
+- epoch metrics CSV with train/test metrics, cumulative wall-clock seconds, and cumulative optimizer steps
 - step diagnostics CSV
-- loss plot
+- loss plots by epoch, optimizer steps, and wall-clock time
 - accuracy plot
+- accuracy plots by optimizer steps and wall-clock time
 - controlled alpha plot
 - run metadata JSON/TXT
 

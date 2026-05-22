@@ -10,6 +10,7 @@ import random
 import re
 import struct
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -129,6 +130,8 @@ class EpochMetrics:
     train_accuracy: float
     test_loss: float
     test_accuracy: float
+    elapsed_seconds: float = 0.0
+    optimizer_steps: int = 0
     mean_alpha: float | None = None
     mean_rho: float | None = None
     accepted_rate: float | None = None
@@ -139,6 +142,11 @@ class OptimizerRun:
     name: str
     metrics: list[EpochMetrics]
     step_logs: list[ControlledMuonStep] | None = None
+
+
+@dataclass
+class ProgressConfig:
+    print_every: int = 0
 
 
 @dataclass
@@ -347,6 +355,34 @@ def evaluate(model: nn.Module, loader: DataLoader, criterion: nn.Module, device:
     return total_loss / total, total_correct / total
 
 
+def format_epoch_metrics(run_name: str, row: EpochMetrics, epoch_seconds: float) -> str:
+    message = (
+        f"[{run_name}] epoch {row.epoch}: "
+        f"train_loss={row.train_loss:.4f}, train_acc={row.train_accuracy:.4f}, "
+        f"test_loss={row.test_loss:.4f}, test_acc={row.test_accuracy:.4f}, "
+        f"epoch_elapsed={epoch_seconds:.1f}s, "
+        f"total_elapsed={row.elapsed_seconds:.1f}s, steps={row.optimizer_steps}"
+    )
+    if row.mean_alpha is not None:
+        message += (
+            f", mean_alpha={row.mean_alpha:.3e}, "
+            f"mean_rho={row.mean_rho:.3f}, accepted={row.accepted_rate:.3f}"
+        )
+    return message
+
+
+def maybe_print_epoch(
+    run_name: str,
+    row: EpochMetrics,
+    epoch_seconds: float,
+    progress: ProgressConfig | None,
+) -> None:
+    if progress is None or progress.print_every <= 0:
+        return
+    if row.epoch == 1 or row.epoch % progress.print_every == 0:
+        print(format_epoch_metrics(run_name, row, epoch_seconds), flush=True)
+
+
 def train_vanilla_muon(
     model: nn.Module,
     train_loader: DataLoader,
@@ -358,14 +394,18 @@ def train_vanilla_muon(
     lr: float,
     seed: int,
     config: MuonConfig,
+    run_name: str = "vanilla_muon",
+    progress: ProgressConfig | None = None,
 ) -> list[EpochMetrics]:
     metrics = []
     config = config
     momentum_buffers = [torch.zeros_like(param) for param in model.parameters() if param.requires_grad]
+    run_start_time = time.perf_counter()
+    optimizer_steps = 0
     for epoch in range(1, epochs + 1):
+        epoch_start_time = time.perf_counter()
         set_seed(seed + epoch)
         model.train()
-        mb_index = 0
         for x, y in train_loader:
             x = x.to(device)
             y = y.to(device)
@@ -382,10 +422,22 @@ def train_vanilla_muon(
                     direction, new_momentum = _direction_for_param(param.grad.detach(), momentum_buffers[idx], config)
                     momentum_buffers[idx] = new_momentum
                     param.add_(direction, alpha=lr)
-                    mb_index += 1
+            optimizer_steps += 1
         train_loss, train_accuracy = evaluate(model, eval_train_loader, criterion, device)
         test_loss, test_accuracy = evaluate(model, test_loader, criterion, device)
-        metrics.append(EpochMetrics(epoch, train_loss, train_accuracy, test_loss, test_accuracy))
+        epoch_seconds = time.perf_counter() - epoch_start_time
+        metrics.append(
+            EpochMetrics(
+                epoch=epoch,
+                train_loss=train_loss,
+                train_accuracy=train_accuracy,
+                test_loss=test_loss,
+                test_accuracy=test_accuracy,
+                elapsed_seconds=time.perf_counter() - run_start_time,
+                optimizer_steps=optimizer_steps,
+            )
+        )
+        maybe_print_epoch(run_name, metrics[-1], epoch_seconds, progress)
     return metrics
 
 
@@ -412,6 +464,8 @@ def train_controlled_muon(
     seed: int,
     use_rho_ema: bool = True,
     reject_bad_steps: bool = True,
+    run_name: str = "controlled_muon",
+    progress: ProgressConfig | None = None,
 ) -> tuple[list[EpochMetrics], list[ControlledMuonStep]]:
     optimizer = TorchControlledMuon(
         model.parameters(),
@@ -434,7 +488,10 @@ def train_controlled_muon(
     )
     metrics = []
     step_logs = []
+    run_start_time = time.perf_counter()
+    optimizer_steps = 0
     for epoch in range(1, epochs + 1):
+        epoch_start_time = time.perf_counter()
         set_seed(seed + epoch)
         model.train()
         epoch_logs = []
@@ -451,9 +508,11 @@ def train_controlled_muon(
             step_log = optimizer.step(loss_before, same_batch_loss)
             step_logs.append(step_log)
             epoch_logs.append(step_log)
+            optimizer_steps += 1
         train_loss, train_accuracy = evaluate(model, eval_train_loader, criterion, device)
         test_loss, test_accuracy = evaluate(model, test_loader, criterion, device)
         finite_rhos = [log.rho for log in epoch_logs if np.isfinite(log.rho)]
+        epoch_seconds = time.perf_counter() - epoch_start_time
         metrics.append(
             EpochMetrics(
                 epoch=epoch,
@@ -461,11 +520,14 @@ def train_controlled_muon(
                 train_accuracy=train_accuracy,
                 test_loss=test_loss,
                 test_accuracy=test_accuracy,
+                elapsed_seconds=time.perf_counter() - run_start_time,
+                optimizer_steps=optimizer_steps,
                 mean_alpha=float(np.mean([log.alpha for log in epoch_logs])),
                 mean_rho=float(np.mean(finite_rhos)) if finite_rhos else float("nan"),
                 accepted_rate=float(np.mean([log.accepted for log in epoch_logs])),
             )
         )
+        maybe_print_epoch(run_name, metrics[-1], epoch_seconds, progress)
     return metrics, step_logs
 
 
@@ -530,6 +592,24 @@ def plot_metrics(output_dir: Path, dataset_name: str, runs: list[OptimizerRun]) 
     plt.savefig(output_dir / f"{dataset_name}_accuracy.png", dpi=160)
     plt.close()
 
+    plot_metric_by_axis(
+        output_dir,
+        dataset_name,
+        runs,
+        axis_attr="optimizer_steps",
+        axis_label="Optimizer steps",
+        axis_slug="steps",
+    )
+    if all(any(row.elapsed_seconds > 0.0 for row in run.metrics) for run in runs):
+        plot_metric_by_axis(
+            output_dir,
+            dataset_name,
+            runs,
+            axis_attr="elapsed_seconds",
+            axis_label="Wall-clock seconds",
+            axis_slug="time",
+        )
+
     runs_with_steps = [run for run in runs if run.step_logs]
     if runs_with_steps:
         plt.figure(figsize=(7, 4))
@@ -546,10 +626,73 @@ def plot_metrics(output_dir: Path, dataset_name: str, runs: list[OptimizerRun]) 
         plt.close()
 
 
+def plot_metric_by_axis(
+    output_dir: Path,
+    dataset_name: str,
+    runs: list[OptimizerRun],
+    *,
+    axis_attr: str,
+    axis_label: str,
+    axis_slug: str,
+) -> None:
+    series = [(run, [float(getattr(row, axis_attr)) for row in run.metrics]) for run in runs]
+    if not all(any(value > 0.0 for value in values) for _, values in series):
+        return
+
+    metric_specs = [
+        ("test_loss", "Test cross-entropy", "loss"),
+        ("train_loss", "Train cross-entropy", "train_loss"),
+        ("test_accuracy", "Test accuracy", "accuracy"),
+    ]
+    for metric_attr, ylabel, metric_slug in metric_specs:
+        plt.figure(figsize=(7, 4))
+        for run, x_values in series:
+            plt.plot(x_values, [getattr(row, metric_attr) for row in run.metrics], label=run.name)
+        plt.xlabel(axis_label)
+        plt.ylabel(ylabel)
+        plt.title(f"{dataset_name} {ylabel.lower()} vs {axis_label.lower()}")
+        plt.grid(True)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(output_dir / f"{dataset_name}_{metric_slug}_vs_{axis_slug}.png", dpi=160)
+        plt.close()
+
+    plt.figure(figsize=(8, 4.5))
+    for run, x_values in series:
+        line = plt.plot(x_values, [row.test_loss for row in run.metrics], label=f"{run.name} test")[0]
+        plt.plot(
+            x_values,
+            [row.train_loss for row in run.metrics],
+            linestyle="--",
+            color=line.get_color(),
+            label=f"{run.name} train",
+        )
+    plt.xlabel(axis_label)
+    plt.ylabel("Cross-entropy")
+    plt.title(f"{dataset_name} train vs test loss vs {axis_label.lower()}")
+    plt.grid(True)
+    plt.legend(fontsize=8, ncol=2)
+    plt.tight_layout()
+    plt.savefig(output_dir / f"{dataset_name}_train_test_loss_vs_{axis_slug}.png", dpi=160)
+    plt.close()
+
+
 def save_epoch_metrics(path: Path, runs: list[OptimizerRun]) -> None:
     with path.open("w", newline="") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["optimizer", "epoch", "train_loss", "train_accuracy", "test_loss", "test_accuracy", "mean_alpha", "mean_rho", "accepted_rate"])
+        writer.writerow([
+            "optimizer",
+            "epoch",
+            "train_loss",
+            "train_accuracy",
+            "test_loss",
+            "test_accuracy",
+            "elapsed_seconds",
+            "optimizer_steps",
+            "mean_alpha",
+            "mean_rho",
+            "accepted_rate",
+        ])
         for run in runs:
             for row in run.metrics:
                 writer.writerow([
@@ -559,6 +702,8 @@ def save_epoch_metrics(path: Path, runs: list[OptimizerRun]) -> None:
                     row.train_accuracy,
                     row.test_loss,
                     row.test_accuracy,
+                    row.elapsed_seconds,
+                    row.optimizer_steps,
                     "" if row.mean_alpha is None else row.mean_alpha,
                     "" if row.mean_rho is None else row.mean_rho,
                     "" if row.accepted_rate is None else row.accepted_rate,
@@ -694,6 +839,16 @@ def save_run_metadata(output_dir: Path, args: argparse.Namespace, dataset_bundle
             "criterion": "CrossEntropyLoss",
             "eval_train_transform_is_deterministic": dataset_name == "cifar10",
             "epoch_seed_rule": "set_seed(seed + epoch) for each optimizer variant",
+            "epoch_metrics_include": [
+                "epoch",
+                "elapsed_seconds",
+                "optimizer_steps",
+                "train_loss",
+                "train_accuracy",
+                "test_loss",
+                "test_accuracy",
+            ],
+            "print_every": args.print_every,
         },
         "optimizers": optimizer_variant_specs(args),
     }
@@ -728,6 +883,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--download", action="store_true")
     parser.add_argument("--device", default="cpu")
+    parser.add_argument("--print-every", type=int, default=1)
     return parser.parse_args()
 
 
@@ -752,6 +908,7 @@ def run_controlled_variant(
     reject_bad_steps: bool,
     alpha_min: float | None = None,
     alpha_max: float | None = None,
+    progress: ProgressConfig | None = None,
 ) -> OptimizerRun:
     model = make_model(args.model, dataset_name).to(device)
     model.load_state_dict(base_state)
@@ -779,6 +936,8 @@ def run_controlled_variant(
         args.seed,
         use_rho_ema=use_rho_ema,
         reject_bad_steps=reject_bad_steps,
+        run_name=name,
+        progress=progress,
     )
     return OptimizerRun(name, metrics, step_logs)
 
@@ -795,6 +954,7 @@ def main() -> None:
     eval_train_data = datasets.eval_train_data
     test_data = datasets.test_data
     dataset_name = datasets.name
+    progress = ProgressConfig(print_every=args.print_every)
     eval_train_loader = make_loader(eval_train_data, args.batch_size, False, args.seed)
     eval_test_loader = make_loader(test_data, args.batch_size, False, args.seed)
 
@@ -818,6 +978,8 @@ def main() -> None:
         args.lr,
         args.seed,
         MuonConfig(),
+        run_name="vanilla_muon",
+        progress=progress,
     )
     runs.append(OptimizerRun("vanilla_muon", vanilla_metrics))
 
@@ -843,13 +1005,14 @@ def main() -> None:
                 reject_bad_steps=False,
                 alpha_min=args.lr,
                 alpha_max=args.lr,
+                progress=progress,
             )
         )
-        runs.append(run_controlled_variant("controlled_raw_rho", base_state, train_data, eval_train_loader, eval_test_loader, criterion, device, args, dataset_name, alpha0=args.lr, kp=args.controlled_kp, rho_beta=0.0, min_alpha_factor=args.controlled_min_alpha_factor, max_alpha_factor=args.controlled_max_alpha_factor, trust_region_expand=False, use_rho_ema=False, reject_bad_steps=True))
-        runs.append(run_controlled_variant("controlled_ema", base_state, train_data, eval_train_loader, eval_test_loader, criterion, device, args, dataset_name, alpha0=args.lr, kp=args.controlled_kp, rho_beta=args.controlled_rho_beta, min_alpha_factor=args.controlled_min_alpha_factor, max_alpha_factor=args.controlled_max_alpha_factor, trust_region_expand=False, use_rho_ema=True, reject_bad_steps=True))
-        runs.append(run_controlled_variant("controlled_ema_trust", base_state, train_data, eval_train_loader, eval_test_loader, criterion, device, args, dataset_name, alpha0=args.lr, kp=args.controlled_kp, rho_beta=args.controlled_rho_beta, min_alpha_factor=args.controlled_min_alpha_factor, max_alpha_factor=args.controlled_max_alpha_factor, trust_region_expand=args.controlled_trust_region_expand, use_rho_ema=True, reject_bad_steps=True))
+        runs.append(run_controlled_variant("controlled_raw_rho", base_state, train_data, eval_train_loader, eval_test_loader, criterion, device, args, dataset_name, alpha0=args.lr, kp=args.controlled_kp, rho_beta=0.0, min_alpha_factor=args.controlled_min_alpha_factor, max_alpha_factor=args.controlled_max_alpha_factor, trust_region_expand=False, use_rho_ema=False, reject_bad_steps=True, progress=progress))
+        runs.append(run_controlled_variant("controlled_ema", base_state, train_data, eval_train_loader, eval_test_loader, criterion, device, args, dataset_name, alpha0=args.lr, kp=args.controlled_kp, rho_beta=args.controlled_rho_beta, min_alpha_factor=args.controlled_min_alpha_factor, max_alpha_factor=args.controlled_max_alpha_factor, trust_region_expand=False, use_rho_ema=True, reject_bad_steps=True, progress=progress))
+        runs.append(run_controlled_variant("controlled_ema_trust", base_state, train_data, eval_train_loader, eval_test_loader, criterion, device, args, dataset_name, alpha0=args.lr, kp=args.controlled_kp, rho_beta=args.controlled_rho_beta, min_alpha_factor=args.controlled_min_alpha_factor, max_alpha_factor=args.controlled_max_alpha_factor, trust_region_expand=args.controlled_trust_region_expand, use_rho_ema=True, reject_bad_steps=True, progress=progress))
     else:
-        runs.append(run_controlled_variant("controlled_muon", base_state, train_data, eval_train_loader, eval_test_loader, criterion, device, args, dataset_name, alpha0=args.lr, kp=args.controlled_kp, rho_beta=args.controlled_rho_beta, min_alpha_factor=args.controlled_min_alpha_factor, max_alpha_factor=args.controlled_max_alpha_factor, trust_region_expand=args.controlled_trust_region_expand, use_rho_ema=True, reject_bad_steps=True))
+        runs.append(run_controlled_variant("controlled_muon", base_state, train_data, eval_train_loader, eval_test_loader, criterion, device, args, dataset_name, alpha0=args.lr, kp=args.controlled_kp, rho_beta=args.controlled_rho_beta, min_alpha_factor=args.controlled_min_alpha_factor, max_alpha_factor=args.controlled_max_alpha_factor, trust_region_expand=args.controlled_trust_region_expand, use_rho_ema=True, reject_bad_steps=True, progress=progress))
 
     prefix = dataset_name
     save_epoch_metrics(output_dir / f"{prefix}_epoch_metrics.csv", runs)
