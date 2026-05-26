@@ -101,7 +101,8 @@ stronger optimizer directions, while the PI folders package the integral
 controller variants as standalone PyTorch optimizers:
 
 - `controlled_adam_project/`: Adam chooses the direction; the controller chooses
-  the global multiplier.
+  the global multiplier. Its image benchmark checkpoints can now be
+  post-processed into PCA training-trajectory plots.
 - `controlled_muon_project/`: Muon-style orthogonalization chooses the
   matrix-shaped direction; the controller chooses the global multiplier.
 - `pi_adam_optimizer/` and `pi_muon_optimizer/`: standalone PI-controller
@@ -238,6 +239,21 @@ and 60-start aggregate function reports, and the focused Rastrigin basin benchma
 
 The image benchmark runner supports long-run visibility with
 `--print-every N` and `--checkpoint-every N`.
+
+Checkpointed Adam image runs can be visualized in the PCA trajectory plane used
+by loss-landscape papers:
+
+```bash
+cd controlled_adam_project
+MPLCONFIGDIR=/private/tmp PYTHONPATH=src:examples python examples/plot_pca_training_trajectory.py \
+  outputs/YOUR_RUN_WITH_CHECKPOINTS \
+  --runs vanilla_adam controlled_raw_rho controlled_ema \
+  --output-dir outputs/YOUR_RUN_WITH_CHECKPOINTS/pca_trajectory
+```
+
+The script projects saved checkpoints using trainable parameters by default and
+writes `pca_trajectory_coordinates.csv`, `pca_explained_variance.csv`, and
+`pca_training_trajectory.png`.
 
 Recent CIFAR-10 Adam tuning runs on a 20k/5k subset showed a useful pattern:
 

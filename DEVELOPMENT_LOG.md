@@ -1441,7 +1441,69 @@ The latest local commit containing the PI optimizer and Muon alignment work is:
 9c55036 Add PI optimizers and align Muon implementation
 ```
 
-## 14. Recommended Next Engineering Steps
+## 14. PCA Training-Trajectory Visualization
+
+Added a checkpoint post-processor for high-dimensional Adam training paths:
+
+```text
+controlled_adam_project/examples/plot_pca_training_trajectory.py
+```
+
+Purpose:
+
+- Reproduce the PCA trajectory visualization idea from neural loss-landscape
+  papers.
+- Use checkpoints produced by `controlled_adam_project/examples/run_mnist_demo.py`
+  with `--checkpoint-every N`.
+- Flatten trainable parameters by default, excluding BatchNorm running buffers.
+- Fit a 2D PCA plane to checkpoint displacements.
+- Overlay one or more optimizer trajectories in that shared plane.
+
+Main outputs:
+
+```text
+pca_trajectory_coordinates.csv
+pca_explained_variance.csv
+pca_training_trajectory.png
+```
+
+Typical command:
+
+```bash
+cd controlled_adam_project
+MPLCONFIGDIR=/private/tmp PYTHONPATH=src:examples python examples/plot_pca_training_trajectory.py \
+  outputs/YOUR_RUN_WITH_CHECKPOINTS \
+  --runs vanilla_adam fixed_adam_direction controlled_raw_rho controlled_ema \
+  --output-dir outputs/YOUR_RUN_WITH_CHECKPOINTS/pca_trajectory
+```
+
+Implementation details:
+
+- The script accepts either a run directory containing `checkpoints/` or the
+  checkpoint directory itself.
+- It infers dataset/model from `run_metadata.json` when available, or accepts
+  explicit `--dataset` and `--model`.
+- The default reference origin is the final checkpoint of the first selected
+  run. `--reference-run` and `--reference-epoch` override this.
+- Standard PCA centering is used by default while coordinates remain
+  final-relative. `--no-center-for-pca` fits directly on final-relative
+  displacements.
+- Misspelled `--runs` values now fail clearly and list available runs.
+
+Verification:
+
+```text
+python -m py_compile examples/plot_pca_training_trajectory.py
+single-run smoke: 20 checkpoints, 175258 parameters
+multi-run smoke: 80 checkpoints, 206922 parameters
+checkpoint-directory input plus --no-center-for-pca: passed
+bad --runs name: clear ValueError with available run names
+```
+
+The README in `controlled_adam_project/` and the root README now include the
+usage command.
+
+## 15. Recommended Next Engineering Steps
 
 1. Add checkpointing and incremental epoch-metrics flushing to the Muon image
    benchmark runner. It now has `--print-every`, but long jobs still need

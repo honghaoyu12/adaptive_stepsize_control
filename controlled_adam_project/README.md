@@ -515,6 +515,22 @@ deterministic normalized evaluation transforms on the same subset indices.
 Use `--print-every N` for live epoch summaries and `--checkpoint-every N` to
 write per-epoch model/optimizer checkpoints under the output directory.
 
+To visualize a checkpointed run's high-dimensional training path in a PCA
+plane, run:
+
+```bash
+MPLCONFIGDIR=/private/tmp PYTHONPATH=src:examples python examples/plot_pca_training_trajectory.py \
+  outputs/YOUR_RUN_WITH_CHECKPOINTS \
+  --runs vanilla_adam controlled_raw_rho controlled_ema \
+  --output-dir outputs/YOUR_RUN_WITH_CHECKPOINTS/pca_trajectory
+```
+
+The script flattens trainable parameters from the saved checkpoints, fits the
+first two principal directions to final-relative checkpoint displacements, and
+writes `pca_trajectory_coordinates.csv`, `pca_explained_variance.csv`, and
+`pca_training_trajectory.png`. By default the plot origin is the final
+checkpoint of the first selected run.
+
 Recent CIFAR-10 observations:
 
 - The stronger CNN reaches a much more reasonable subset baseline than the

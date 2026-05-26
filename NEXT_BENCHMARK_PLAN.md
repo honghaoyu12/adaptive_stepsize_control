@@ -287,6 +287,8 @@ Every benchmark should report:
 - elapsed wall-clock time and relative time versus vanilla Adam
 - full model architecture and parameter count
 - dataset subset size, transforms, seed, batch size, and learning rate
+- for checkpointed Adam image runs, optional PCA training-trajectory plots via
+  `controlled_adam_project/examples/plot_pca_training_trajectory.py`
 
 ## First Concrete Implementation Task
 

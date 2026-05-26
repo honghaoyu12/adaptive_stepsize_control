@@ -647,6 +647,28 @@ The runner writes:
 
 The Adam image runner also supports `--print-every N` for live epoch summaries.
 
+Checkpointed Adam image runs can be post-processed with:
+
+```bash
+cd controlled_adam_project
+MPLCONFIGDIR=/private/tmp PYTHONPATH=src:examples python examples/plot_pca_training_trajectory.py \
+  outputs/YOUR_RUN_WITH_CHECKPOINTS \
+  --runs vanilla_adam fixed_adam_direction controlled_raw_rho controlled_ema \
+  --output-dir outputs/YOUR_RUN_WITH_CHECKPOINTS/pca_trajectory
+```
+
+This implements the training-trajectory PCA view used in loss-landscape
+visualization work. It flattens trainable parameters from per-epoch checkpoints,
+fits a 2D PCA plane to checkpoint displacements, and writes:
+
+- `pca_trajectory_coordinates.csv`
+- `pca_explained_variance.csv`
+- `pca_training_trajectory.png`
+
+By default, the origin is the final checkpoint of the first selected run. Use
+`--reference-run` or `--reference-epoch` to choose a different origin, and use
+`--no-center-for-pca` to fit PCA directly on final-relative displacements.
+
 ### Important Adam Results
 
 Fashion-MNIST comparison to another project:
@@ -1104,25 +1126,30 @@ On another machine, either copy this folder or run the Adam/Muon runner with `--
 
 ## Recommended Next Steps For The Next Agent
 
-1. Add checkpointing and incremental epoch-metrics flushing to the Muon
+1. Consider extending the PCA trajectory post-processor with optional loss
+   contour evaluation on the same PCA plane. The current implementation plots
+   trajectories only; contour evaluation would require rebuilding the dataset
+   and running many forward passes.
+
+2. Add checkpointing and incremental epoch-metrics flushing to the Muon
    `run_mnist_demo.py`. Per-epoch progress printing already exists through
    `--print-every`, but long jobs would still benefit from partial CSV output
    and resumable checkpoints.
 
-2. Add automatic best-epoch summary CSV/JSON so users do not need ad hoc parsing.
+3. Add automatic best-epoch summary CSV/JSON so users do not need ad hoc parsing.
 
-3. Consider a faster torch-native Muon implementation:
+4. Consider a faster torch-native Muon implementation:
    - avoid NumPy round-trips where possible
    - use batched or GPU-compatible orthogonalization
    - treat bias/BatchNorm parameters separately if needed
 
-4. Tune Muon controller settings separately from Adam.
+5. Tune Muon controller settings separately from Adam.
    The default `alpha_max=0.05` worked surprisingly well on Muon CIFAR subset runs, but should be stress-tested.
 
-5. Run full-dataset benchmarks only after checkpointing or incremental metrics
+6. Run full-dataset benchmarks only after checkpointing or incremental metrics
    writing is added.
 
-6. Consider early stopping or best-checkpoint reporting.
+7. Consider early stopping or best-checkpoint reporting.
    In long runs, peak accuracy can occur before the final epoch.
 
 ## Quick Verification Commands

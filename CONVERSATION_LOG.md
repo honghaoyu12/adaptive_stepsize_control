@@ -17,6 +17,11 @@ For manager-facing deterministic function optimization results, see
 `FUNCTION_OPTIMIZATION_BENCHMARK_SUITE.md` and regenerate the local report with
 `controlled_adam_project/examples/run_function_benchmark_report.py`.
 
+For high-dimensional Adam image-training trajectory visualization, use
+`controlled_adam_project/examples/plot_pca_training_trajectory.py` on a run
+created with `--checkpoint-every`. It writes PCA coordinates, explained
+variance, and a trajectory PNG from trainable checkpoint parameters.
+
 This log summarizes the current state of the whole `adaptive_stepsize_control`
 workspace so future sessions can resume without rediscovering the project.
 
@@ -37,6 +42,8 @@ The workspace contains five related project areas:
      actual-over-predicted decrease ratio.
    - Now includes a self-contained deterministic function benchmark report
      runner for manager updates.
+   - Now includes a PCA checkpoint-trajectory post-processor:
+     `examples/plot_pca_training_trajectory.py`.
 
 3. Subproject: `controlled_muon_project`
    - Muon version of the controlled Adam project.
