@@ -1,6 +1,6 @@
 # Optimizer Variant Benchmark Report
 
-Last updated: 2026-05-21
+Last updated: 2026-05-26
 
 Repository root:
 
@@ -246,11 +246,11 @@ cd controlled_muon_project
 PYTHONPATH=src pytest -q
 ```
 
-Recent verification while editing this report:
+Recent focused verification after the PI optimizer and Muon alignment work:
 
 ```text
 controlled_adam_project: 9 passed
-controlled_muon_project: 6 passed
+controlled_muon_project: 12 passed
 ```
 
 ### 0.6 Glossary

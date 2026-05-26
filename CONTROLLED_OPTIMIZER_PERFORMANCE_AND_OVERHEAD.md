@@ -4,6 +4,12 @@ This note summarizes the observed performance of the controlled optimizer
 variants, with special attention to wall-clock time and the overhead from the
 extra same-minibatch forward pass.
 
+Current-status note: the Muon neural results in this overhead note are
+historical and predate the official-style Muon parameter-scope cleanup. Treat
+them as evidence about controller overhead and alpha adaptation, not as current
+vanilla-Muon quality comparisons. Future Muon neural comparisons should use the
+corrected official-style Muon path.
+
 The main conclusion is:
 
 ```text

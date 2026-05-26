@@ -1,6 +1,6 @@
 # Next Benchmark Plan
 
-Last updated: 2026-05-24
+Last updated: 2026-05-26
 
 Note: for manager-facing deterministic function optimization results, use the
 new tracked guide `FUNCTION_OPTIMIZATION_BENCHMARK_SUITE.md` and the report

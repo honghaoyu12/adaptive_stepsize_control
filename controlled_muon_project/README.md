@@ -149,8 +149,9 @@ MPLCONFIGDIR=/private/tmp PYTHONPATH=src python examples/run_mnist_demo.py \
 
 The historical tables below predate the official-style Muon parameter-scope
 cleanup and should be treated as archival. For current PI-vs-vanilla
-Fashion-MNIST comparisons, use the `outputs/pi_official_muon_*` folders in the
-parent workspace.
+Fashion-MNIST comparisons from the latest experiment round, use the archived
+`../outputs/backup_20260526_182414/pi_official_muon_*` folders in the parent
+workspace, or rerun the PI benchmark into a fresh top-level output folder.
 
 Fashion-MNIST, 20 epochs, 4096 train / 1024 test:
 

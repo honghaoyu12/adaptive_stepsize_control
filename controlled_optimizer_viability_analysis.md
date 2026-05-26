@@ -3,6 +3,12 @@
 **Date:** 2026-05-21  
 **Topic:** Viability of the controlled optimizer idea after reviewing the performance and overhead report.
 
+**Current-status note, 2026-05-26:** the Muon neural benchmark numbers in this
+analysis predate the official-style Muon parameter-scope fix. They are useful
+for understanding overhead and controller behavior, but should not be used as
+current evidence against a corrected vanilla Muon baseline. New neural Muon
+claims should use the official-style path only.
+
 ---
 
 ## Executive Summary

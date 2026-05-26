@@ -90,12 +90,15 @@ adaptive_stepsize_control/
 ├── tests/
 │   └── test_quadratic_demo.py
 ├── controlled_adam_project/
-└── controlled_muon_project/
+├── controlled_muon_project/
+├── pi_adam_optimizer/
+└── pi_muon_optimizer/
 ```
 
-The root project is the original gradient-descent demo. The two subprojects
-apply the same actual-versus-predicted decrease controller to stronger
-optimizer directions:
+The root project is the original gradient-descent demo. The controlled
+subprojects apply the same actual-versus-predicted decrease controller to
+stronger optimizer directions, while the PI folders package the integral
+controller variants as standalone PyTorch optimizers:
 
 - `controlled_adam_project/`: Adam chooses the direction; the controller chooses
   the global multiplier.
@@ -109,7 +112,7 @@ optimizer directions:
 For a detailed transfer note for another machine or coding agent, read
 `PROJECT_HANDOFF.md`.
 
-Project memory is split across four documents:
+Project memory is split across the main documents below:
 
 - `CONVERSATION_LOG.md` preserves the nuanced discussion history.
 - `DEVELOPMENT_LOG.md` records the chronological engineering and benchmark
@@ -250,13 +253,14 @@ The best recent result came from the balanced raw-rho setting:
 - `fixed_adam_direction`: best test accuracy `0.8220`
 - `vanilla_adam`: best test accuracy `0.8158`
 
-The current output folders that capture this tuning sequence are:
+The archived output folders that capture this tuning sequence are now under
+`controlled_adam_project/outputs/backup_20260526_182414/`:
 
-- `controlled_adam_project/outputs/cifar10_20k_5k_20epochs_adam_conservative_rhostar82/`
-- `controlled_adam_project/outputs/cifar10_20k_5k_20epochs_adam_tuned_balanced_alpha15_rhostar80_beta90/`
-- `controlled_adam_project/outputs/cifar10_20k_5k_20epochs_adam_tuned_open_alpha20_rhostar78_beta90/`
-- `controlled_adam_project/outputs/cifar10_20k_5k_20epochs_adam_tuned_balanced_alpha15_rhostar78_beta90/`
-- `controlled_adam_project/outputs/cifar10_20k_5k_20epochs_adam_tuned_balanced_alpha15_rhostar80_beta85/`
+- `controlled_adam_project/outputs/backup_20260526_182414/cifar10_20k_5k_20epochs_adam_conservative_rhostar82/`
+- `controlled_adam_project/outputs/backup_20260526_182414/cifar10_20k_5k_20epochs_adam_tuned_balanced_alpha15_rhostar80_beta90/`
+- `controlled_adam_project/outputs/backup_20260526_182414/cifar10_20k_5k_20epochs_adam_tuned_open_alpha20_rhostar78_beta90/`
+- `controlled_adam_project/outputs/backup_20260526_182414/cifar10_20k_5k_20epochs_adam_tuned_balanced_alpha15_rhostar78_beta90/`
+- `controlled_adam_project/outputs/backup_20260526_182414/cifar10_20k_5k_20epochs_adam_tuned_balanced_alpha15_rhostar80_beta85/`
 
 For minibatch training, the control ratio evaluates the trial loss on the
 **same minibatch** used to compute the gradient:
@@ -303,7 +307,7 @@ PYTHONPATH=src python examples/run_mnist_demo.py --dataset fashion_mnist --downl
 
 The current PyTorch Muon implementation is intentionally educational and uses
 CPU/NumPy orthogonalization, so CIFAR-10 runs are slower than the Adam runs.
-Add progress logging before running larger Muon experiments.
+Use `--print-every N` for live progress on longer Muon experiments.
 
 The Muon function report is generated at
 `controlled_muon_project/outputs/function_report_multistart/FUNCTION_OPTIMIZATION_MUON_BENCHMARK_REPORT.md`.

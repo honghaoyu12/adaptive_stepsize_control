@@ -1,6 +1,6 @@
 # Function Optimization Benchmark Suite
 
-Last updated: 2026-05-25
+Last updated: 2026-05-26
 
 This document describes the simple deterministic benchmark suites for explaining
 how the controlled optimizers behave on hand-written 2D functions. It is meant
@@ -30,8 +30,9 @@ The Muon generated report is:
 controlled_muon_project/outputs/function_report_multistart/FUNCTION_OPTIMIZATION_MUON_BENCHMARK_REPORT.md
 ```
 
-The output directory is ignored by git, so rerun the command below on a new
-machine to regenerate the report, CSV files, and plots.
+The output directory is ignored by git. Existing generated reports from earlier
+runs were archived under timestamped backup folders on 2026-05-26, so rerun the
+commands below to regenerate fresh report folders.
 
 ## Purpose
 

@@ -1,11 +1,17 @@
 # Conversation Log
 
-Last updated: 2026-05-24
+Last updated: 2026-05-26
 
 Current handoff note: see `PROJECT_HANDOFF.md` first. For a concise
 chronological engineering timeline, see `DEVELOPMENT_LOG.md`. This file remains
 important as the nuanced conversation memory: discussion, interpretation,
 questions, and why decisions evolved.
+
+Current implementation note: the PI Adam and PI Muon subprojects have been
+added, neural-network Muon paths now follow official `torch.optim.Muon` scope,
+and old experimental outputs were archived under timestamped backup folders on
+2026-05-26. Older Muon neural benchmark notes in this log are historical if
+they predate the official-style Muon grouping fix.
 
 For manager-facing deterministic function optimization results, see
 `FUNCTION_OPTIMIZATION_BENCHMARK_SUITE.md` and regenerate the local report with
@@ -16,7 +22,7 @@ workspace so future sessions can resume without rediscovering the project.
 
 ## Workspace Overview
 
-The workspace contains three related Python projects:
+The workspace contains five related project areas:
 
 1. Root project: `adaptive_stepsize_control`
    - Demonstrates fixed-step gradient descent, noisy stochastic gradient
@@ -37,6 +43,18 @@ The workspace contains three related Python projects:
    - Muon-style orthogonalization supplies matrix-shaped directions.
    - Supports the same function benchmark suite plus MNIST, Fashion-MNIST, and
      CIFAR-10 image benchmarks.
+
+4. Standalone optimizer folder: `pi_adam_optimizer`
+   - Packages the Adam-direction controller as a PyTorch `Optimizer` with an
+     added integral term.
+   - Mirrors the P-controller safeguards: optional EMA smoothing, rejection,
+     backtracking, non-descent fallback, and trust-region expansion.
+
+5. Standalone optimizer folder: `pi_muon_optimizer`
+   - Packages the Muon/AdamW-fallback controller as a PyTorch `Optimizer` with
+     PI control.
+   - Follows official `torch.optim.Muon` neural-network scope: Muon for 2D
+     hidden matrix parameters and AdamW-style fallback for the rest.
 
 Recent Adam CIFAR-10 tuning context:
 
@@ -197,8 +215,10 @@ Recent deterministic function optimization report:
   strong.
 
 
-All projects use a `src/` layout, so commands should be run with
-`PYTHONPATH=src` unless the package is installed editable with `pip install -e .`.
+The root and controlled subprojects use a `src/` layout, so commands in those
+folders should be run with `PYTHONPATH=src` unless the package is installed
+editable with `pip install -e .`. The PI optimizer folders are standalone
+module/demo folders.
 
 ## Root Project: Adaptive Step-Size Control
 
@@ -245,7 +265,7 @@ MPLCONFIGDIR=/private/tmp PYTHONPATH=src python examples/run_quadratic_demo.py
 MPLCONFIGDIR=/private/tmp PYTHONPATH=src python examples/run_benchmark_functions.py
 ```
 
-Most recent known test result:
+Known test result from this phase:
 
 ```text
 4 passed
@@ -331,7 +351,7 @@ MPLCONFIGDIR=/private/tmp PYTHONPATH=src python examples/run_demo.py
 MPLCONFIGDIR=/private/tmp PYTHONPATH=src python examples/run_mnist_demo.py --download
 ```
 
-Most recent known test result:
+Known test result from this phase:
 
 ```text
 7 passed
@@ -395,7 +415,7 @@ Controlled Adam final test accuracy: 0.7773
 Controlled Adam accepted rate: 0.9766 overall
 ```
 
-Most recent 20-epoch Fashion-MNIST benchmark with EMA-smoothed rho and clipped
+Earlier 20-epoch Fashion-MNIST benchmark with EMA-smoothed rho and clipped
 alpha updates:
 
 ```text
@@ -1307,7 +1327,7 @@ Note: `outputs/fashion_mnist/` also contains older `sklearn_digits_*` files from
 an earlier fallback run. The `fashion_mnist_*` files are the real Fashion-MNIST
 benchmark.
 
-Most recent smoke run:
+Earlier smoke run:
 
 ```bash
 MPLCONFIGDIR=/private/tmp PYTHONPATH=src python examples/run_mnist_demo.py \
@@ -1375,7 +1395,7 @@ Practical note:
 - Full MNIST may require network access if it is not cached. An offline fallback
   is `sklearn.datasets.load_digits`, but that is not full MNIST.
 
-## Current Observations
+## Earlier Observations
 
 Root project:
 
@@ -1386,11 +1406,11 @@ Root project:
 
 Controlled Adam subproject:
 
-- Controlled Adam strongly improves over vanilla Adam on the quadratic,
-  Rosenbrock, Beale, and Goldstein-Price settings currently in the demo.
-- Vanilla Adam currently beats controlled Adam on the chosen Himmelblau setting.
+- Controlled Adam strongly improved over vanilla Adam on the quadratic,
+  Rosenbrock, Beale, and Goldstein-Price settings used in this earlier demo.
+- Vanilla Adam beat controlled Adam on the chosen Himmelblau setting.
 - Both Adam variants land in the same local basin on Rastrigin and Ackley with
-  the current starting points.
+  those starting points.
 - Six-Hump Camel and Easom include negative objective values, so their objective
   curves are plotted on a linear scale.
 

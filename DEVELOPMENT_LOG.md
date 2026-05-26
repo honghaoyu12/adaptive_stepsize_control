@@ -1,6 +1,6 @@
 # Development Log
 
-Last updated: 2026-05-24
+Last updated: 2026-05-26
 
 This is the chronological engineering log for `adaptive_stepsize_control`.
 
@@ -846,10 +846,10 @@ Initialized and pushed the repository to:
 https://github.com/honghaoyu12/adaptive_stepsize_control.git
 ```
 
-Recent pushed commit before the documentation updates:
+Latest local commit after the PI optimizer and Muon alignment work:
 
 ```text
-20d1850 Add controlled Muon benchmarks and project handoff
+9c55036 Add PI optimizers and align Muon implementation
 ```
 
 The root `.gitignore` excludes:
@@ -942,7 +942,7 @@ PYTHONPATH=src pytest -q
 Latest known result:
 
 ```text
-6 passed
+12 passed
 ```
 
 ## 8. Fashion-MNIST Muon Benchmark
@@ -1311,7 +1311,7 @@ cd controlled_muon_project && PYTHONPATH=src pytest -q
 Result:
 
 ```text
-6 passed
+12 passed
 ```
 
 ## 12. Function Manager Report Follow-Ups
@@ -1378,21 +1378,85 @@ outside that basin, and none reach the true global minimum at radius `4.0`.
 Controlled Adam reaches successful runs faster than vanilla Adam inside the
 correct basin, but it does not solve global basin selection.
 
-## 13. Recommended Next Engineering Steps
+## 13. PI Optimizer Subprojects And Implementation Audit
 
-1. Add per-epoch progress logging to the Muon image benchmark runner. Adam now has `--print-every` and `--checkpoint-every`.
+Added standalone PI-controller optimizer folders:
 
-2. Flush epoch metrics incrementally so long runs produce visible progress and partial results.
+```text
+pi_adam_optimizer/
+pi_muon_optimizer/
+```
 
-3. Add an automatic best-epoch summary file.
+Implementation state:
 
-4. Consider a faster torch-native Muon implementation that avoids NumPy round trips.
+- `PIAdam` wraps Adam's bias-corrected direction with a global PI-controlled
+  multiplier.
+- `PIMuon` applies official-style Muon only to 2D hidden matrix parameters and
+  uses AdamW-style fallback directions for non-2D or excluded parameters.
+- Both PI optimizers support optional EMA smoothing, bad-step rejection,
+  bounded backtracking, non-descent fallback, trust-region expansion, and
+  decoupled weight decay.
+- The PI Fashion-MNIST runner now compares against corrected vanilla baselines:
+  Adam or AdamW for the Adam family, and official-style Muon with AdamW
+  fallback for the Muon family.
 
-5. Tune Muon controller parameters separately from Adam.
+Updated or added documentation:
 
-6. Run larger/full-dataset experiments only after progress logging is in place.
+- `OPTIMIZER_IMPLEMENTATION_AUDIT.md`
+- `pi_adam_optimizer/README.md`
+- `pi_adam_optimizer/PI_ADAM_DESIGN_AND_COMPARISON.md`
+- `pi_muon_optimizer/README.md`
+- `pi_muon_optimizer/PI_MUON_DESIGN_AND_COMPARISON.md`
 
-7. Keep preserving the ablation structure:
+Verification:
+
+```bash
+python -m py_compile pi_adam_optimizer/pi_adam.py pi_muon_optimizer/pi_muon.py examples/run_pi_fashion_mnist_multiseed.py controlled_muon_project/src/controlled_muon/orthogonalization.py controlled_muon_project/src/controlled_muon/optimizers.py controlled_muon_project/src/controlled_muon/torch_optimizers.py controlled_muon_project/examples/run_mnist_demo.py controlled_muon_project/examples/run_function_benchmark_report.py controlled_muon_project/examples/run_matrix_quadratic_demo.py
+pytest -q pi_adam_optimizer/test_pi_adam.py pi_muon_optimizer/test_pi_muon.py
+PYTHONPATH=controlled_muon_project/src pytest -q controlled_muon_project/tests
+PYTHONPATH=controlled_adam_project/src pytest -q controlled_adam_project/tests
+pytest -q tests
+```
+
+Focused results:
+
+```text
+PI optimizer tests: 15 passed
+controlled_muon_project tests: 12 passed
+controlled_adam_project tests: 9 passed
+root tests: 4 passed
+```
+
+Archived previous generated experiment outputs into:
+
+```text
+outputs/backup_20260526_182414/
+controlled_adam_project/outputs/backup_20260526_182414/
+controlled_muon_project/outputs/backup_20260526_182414/
+```
+
+The latest local commit containing the PI optimizer and Muon alignment work is:
+
+```text
+9c55036 Add PI optimizers and align Muon implementation
+```
+
+## 14. Recommended Next Engineering Steps
+
+1. Add checkpointing and incremental epoch-metrics flushing to the Muon image
+   benchmark runner. It now has `--print-every`, but long jobs still need
+   partial CSV output and resumable checkpoints.
+
+2. Add an automatic best-epoch summary file.
+
+3. Consider a faster torch-native Muon implementation that avoids NumPy round trips.
+
+4. Tune Muon controller parameters separately from Adam.
+
+5. Run larger/full-dataset experiments only after checkpointing or incremental
+   metrics writing is in place.
+
+6. Keep preserving the ablation structure:
    - base optimizer
    - fixed direction
    - raw rho control

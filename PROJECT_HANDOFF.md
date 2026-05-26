@@ -1,6 +1,6 @@
 # Project Handoff: Adaptive Step-Size Control
 
-Last updated: 2026-05-24
+Last updated: 2026-05-26
 
 This document is for a future coding agent taking over the workspace. It is intentionally comprehensive and operational: it explains what the project is, what has been implemented, how to run it, what benchmark results are already known, and what caveats matter.
 
@@ -54,13 +54,15 @@ Using a different minibatch would confuse minibatch noise with true optimization
 
 ## Repository Layout
 
-The workspace contains three related projects:
+The workspace contains five related project areas:
 
 ```text
 adaptive_stepsize_control/
 ├── src/adaptive_stepsize_control/       # root gradient-descent controller demo
 ├── controlled_adam_project/             # Adam direction + outer controller
 ├── controlled_muon_project/             # Muon direction + outer controller
+├── pi_adam_optimizer/                   # standalone PI-controlled Adam
+├── pi_muon_optimizer/                   # standalone PI-controlled Muon
 ├── examples/                            # root project examples
 ├── tests/                               # root project tests
 ├── fashion/                             # local Fashion-MNIST IDX gzip files
@@ -70,7 +72,10 @@ adaptive_stepsize_control/
 └── PROJECT_HANDOFF.md                   # this file
 ```
 
-All projects use a `src/` layout. Either install editable with `pip install -e .`, or run with `PYTHONPATH=src`.
+The root, controlled Adam, and controlled Muon projects use a `src/` layout.
+The PI optimizer folders are standalone module/demo folders. Either install the
+`src/` projects editable with `pip install -e .`, or run with `PYTHONPATH=src`
+where needed.
 
 Generated outputs and local datasets are intentionally ignored by git.
 
@@ -90,26 +95,25 @@ fresh descriptive folder names. Treat the backup folders as archival.
 
 ## Current Git State
 
-The Muon benchmark and handoff work was committed and pushed in:
+The latest project update was committed locally in:
 
 ```text
-20d1850 Add controlled Muon benchmarks and project handoff
+9c55036 Add PI optimizers and align Muon implementation
 ```
 
-After that commit, additional documentation updates were made to:
+That commit added the PI Adam and PI Muon subprojects, aligned the neural Muon
+implementations with official `torch.optim.Muon` behavior, updated the audit
+and project-memory documents, and archived older experimental outputs. At the
+time of this handoff, the only expected untracked files are generated artifacts
+kept out of git by design:
 
-- `README.md`
-- `CONVERSATION_LOG.md`
-- `PROJECT_HANDOFF.md`
-- `DEVELOPMENT_LOG.md`
-- `controlled_muon_project/README.md`
+```text
+fashionmnist_20epoch_metrics.png
+fashionmnist_20epoch_metrics.summary.csv
+scheduled_iterate_muon_academic_report.pdf
+```
 
-After the documentation commit, the Adam CIFAR runner was updated with
-per-epoch progress printing and checkpointing, and a larger 20k/5k CIFAR-10
-ablation was run. Those changes may be uncommitted depending on when this
-handoff is read.
-
-Since then, several CIFAR-10 Adam tuning sweeps were completed:
+Historical CIFAR-10 Adam tuning sweeps recorded in this handoff:
 
 - balanced cap run:
   - `alpha_max=1.5e-3`
@@ -266,6 +270,61 @@ There are also two user-provided/untracked comparison files at repo root:
 - `fashionmnist_20epoch_metrics.png`
 
 Do not delete user-added files unless explicitly asked.
+
+## PI Optimizer Subprojects
+
+Paths:
+
+```text
+pi_adam_optimizer/
+pi_muon_optimizer/
+```
+
+Purpose: standalone PyTorch optimizer versions of the controlled Adam and Muon
+ideas with a PI controller instead of the older proportional-only controller.
+The PI optimizers preserve the same-batch actual-vs-predicted loss signal and
+add a leaky, clipped integral term:
+
+```text
+log(alpha_next) = log(alpha_used) + kp * (rho_bar - rho_star) + ki * integral
+```
+
+Current implementation state:
+
+- `PIAdam` uses Adam's bias-corrected direction plus a global PI-controlled
+  multiplier.
+- `PIMuon` uses official-style Muon for 2D hidden matrix parameters and
+  AdamW-style fallback directions for all other parameters.
+- Both PI optimizers support optional rho EMA smoothing, bad-step rejection,
+  bounded backtracking, non-descent fallback, trust-region expansion, and
+  decoupled AdamW/Muon-style weight decay.
+- The PI Fashion-MNIST runner also has corrected vanilla baselines:
+  `vanilla_adam` uses Adam or AdamW depending on weight decay, and
+  `vanilla_muon` uses official-style Muon with AdamW fallback.
+
+Important files:
+
+- `pi_adam_optimizer/pi_adam.py`
+- `pi_adam_optimizer/README.md`
+- `pi_adam_optimizer/PI_ADAM_DESIGN_AND_COMPARISON.md`
+- `pi_muon_optimizer/pi_muon.py`
+- `pi_muon_optimizer/README.md`
+- `pi_muon_optimizer/PI_MUON_DESIGN_AND_COMPARISON.md`
+- `examples/run_pi_fashion_mnist_multiseed.py`
+- `examples/plot_pi_fashion_mnist_results.py`
+
+Verification already run:
+
+```bash
+pytest -q pi_adam_optimizer/test_pi_adam.py pi_muon_optimizer/test_pi_muon.py
+python examples/run_pi_fashion_mnist_multiseed.py --output-dir outputs/optimizer_audit_pi_smoke --seeds 101 --optimizers vanilla_adam vanilla_muon pi_adam pi_muon --epochs 1 --train-subset 512 --test-subset 256 --batch-size 128 --alpha0 1e-2 --weight-decay 0.01 --print-every 1
+```
+
+Known result:
+
+```text
+15 passed
+```
 
 ## Root Project
 
@@ -761,6 +820,13 @@ orthogonalization and same-minibatch trial loss evaluations. The deterministic
 2D function runner still uses a vector analogue of Muon and should not be read
 as a full neural-network `torch.optim.Muon` replacement.
 
+Important benchmark note: older neural Muon tables in this handoff predate the
+official-style parameter grouping fix unless an output folder explicitly says
+`official_muon`. Treat those old all-parameter neural Muon results as archival
+context. Future neural Muon comparisons should use only the corrected
+official-style path: Muon for 2D hidden matrix parameters and AdamW-style
+fallback for the rest.
+
 ### Muon Optimizer Variants
 
 The image runner supports:
@@ -803,7 +869,7 @@ PYTHONPATH=src pytest -q
 Known latest test result:
 
 ```text
-6 passed
+12 passed
 ```
 
 Run function/objective demo:
@@ -884,7 +950,10 @@ MPLCONFIGDIR=/private/tmp PYTHONPATH=src python examples/run_mnist_demo.py \
   --output-dir outputs/cifar10_muon_40epoch_ablation
 ```
 
-Warning: the 40-epoch Muon CIFAR run is slow and currently silent until the end. It took long enough that it was mistaken for being stuck, but it did eventually finish and write metrics/plots. A next agent should add per-epoch progress logging and incremental CSV flushing.
+Warning: the historical 40-epoch Muon CIFAR run was slow and originally silent
+until completion. The current runner now supports `--print-every` per-epoch
+progress output, but long Muon jobs are still CPU-heavy because
+orthogonalization uses the educational NumPy/CPU path.
 
 ### Muon Benchmark Results
 
@@ -1013,7 +1082,10 @@ On another machine, either copy this folder or run the Adam/Muon runner with `--
    depends on the model, hardware, and data pipeline.
 
 2. CIFAR Muon is slow.
-   The current PyTorch Muon implementation orthogonalizes tensors through NumPy/CPU. It is acceptable for research demos but not efficient. Add progress logging before running more long Muon jobs.
+   The current PyTorch Muon implementation orthogonalizes tensors through
+   NumPy/CPU. It is acceptable for research demos but not efficient. Use
+   `--print-every` for live progress, and add checkpointing or incremental CSV
+   flushing before running more long Muon jobs.
 
 3. Muon dependency metadata was recently updated.
    `controlled_muon_project/pyproject.toml` and `requirements.txt` now include `torch`, `torchvision`, and `scikit-learn`.
@@ -1032,23 +1104,25 @@ On another machine, either copy this folder or run the Adam/Muon runner with `--
 
 ## Recommended Next Steps For The Next Agent
 
-1. Add per-epoch progress printing and incremental CSV flushing to the Muon `run_mnist_demo.py`. Adam now has per-epoch printing and checkpointing, but still does not flush epoch metrics incrementally during a run.
+1. Add checkpointing and incremental epoch-metrics flushing to the Muon
+   `run_mnist_demo.py`. Per-epoch progress printing already exists through
+   `--print-every`, but long jobs would still benefit from partial CSV output
+   and resumable checkpoints.
 
 2. Add automatic best-epoch summary CSV/JSON so users do not need ad hoc parsing.
 
-3. Commit the current handoff and Muon updates once reviewed.
-
-4. Consider a faster torch-native Muon implementation:
+3. Consider a faster torch-native Muon implementation:
    - avoid NumPy round-trips where possible
    - use batched or GPU-compatible orthogonalization
    - treat bias/BatchNorm parameters separately if needed
 
-5. Tune Muon controller settings separately from Adam.
+4. Tune Muon controller settings separately from Adam.
    The default `alpha_max=0.05` worked surprisingly well on Muon CIFAR subset runs, but should be stress-tested.
 
-6. Run full-dataset benchmarks only after progress logging is added.
+5. Run full-dataset benchmarks only after checkpointing or incremental metrics
+   writing is added.
 
-7. Consider early stopping or best-checkpoint reporting.
+6. Consider early stopping or best-checkpoint reporting.
    In long runs, peak accuracy can occur before the final epoch.
 
 ## Quick Verification Commands
@@ -1076,7 +1150,7 @@ PYTHONPATH=src pytest -q
 Latest known Muon test result:
 
 ```text
-6 passed
+12 passed
 ```
 
 ## Important Philosophy For Future Changes
