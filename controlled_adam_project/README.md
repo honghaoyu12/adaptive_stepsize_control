@@ -324,6 +324,88 @@ outputs/goldstein_price_controlled_adam_diagnostics.csv
 outputs/easom_controlled_adam_diagnostics.csv
 ```
 
+For a self-contained manager-facing function optimization report, run:
+
+```bash
+MPLCONFIGDIR=/private/tmp PYTHONPATH=src python examples/run_function_benchmark_report.py \
+  --output-dir outputs/function_report_multistart
+```
+
+This deterministic multi-start suite compares vanilla Adam, controlled raw-rho
+Adam, controlled EMA-rho Adam, and controlled EMA+trust Adam on all nine 2D
+functions. It writes:
+
+```text
+outputs/function_report_multistart/FUNCTION_OPTIMIZATION_BENCHMARK_REPORT.md
+outputs/function_report_multistart/FUNCTION_OPTIMIZATION_BENCHMARK_REPORT_ZH.md
+outputs/function_report_multistart/per_start_results.csv
+outputs/function_report_multistart/aggregate_results.csv
+outputs/function_report_multistart/benchmark_config.csv
+outputs/function_report_multistart/*_surface_3d.png
+outputs/function_report_multistart/*_trajectory_comparison.png
+outputs/function_report_multistart/*_objective_curves.png
+outputs/function_report_multistart/*_alpha_curves.png
+```
+
+The top-level `FUNCTION_OPTIMIZATION_BENCHMARK_SUITE.md` explains the design,
+metrics, caveats, and recommended figures for a short manager update.
+
+For the shorter three-function manager report, run:
+
+```bash
+MPLCONFIGDIR=/private/tmp PYTHONPATH=src python examples/run_function_benchmark_report.py \
+  --output-dir outputs/function_report_manager_trimmed \
+  --objectives quadratic beale goldstein_price
+```
+
+The trimmed manager report writes English and Chinese Markdown files plus 3D
+objective-surface plots with the function formula printed inside each figure.
+
+For longer manager-facing function runs, the report runner also supports:
+
+```bash
+MPLCONFIGDIR=/private/tmp PYTHONPATH=src python examples/run_function_benchmark_report.py \
+  --output-dir outputs/function_report_manager_extended_10x_15starts \
+  --objectives quadratic beale goldstein_price rosenbrock himmelblau rastrigin \
+  --step-multiplier 10 \
+  --random-starts-per-objective 10 \
+  --random-seed 20260525
+```
+
+This preserves the original starts and appends deterministic random starts for
+broader aggregation. The current broader-start interpretation is more
+conservative: controlled Adam is especially clean on Himmelblau speed and often
+faster on successful Rosenbrock/Rastrigin runs, while vanilla Adam can catch up
+on some objectives with enough iterations.
+
+The most useful current fixed-budget aggregate is:
+
+```bash
+MPLCONFIGDIR=/private/tmp PYTHONPATH=src python examples/run_function_benchmark_report.py \
+  --output-dir outputs/function_report_manager_extended_60starts_default_steps \
+  --objectives quadratic beale goldstein_price rosenbrock himmelblau rastrigin \
+  --random-starts-per-objective 55 \
+  --random-seed 20260525
+```
+
+This uses 60 starts per function and the default iteration budgets. It is a good
+manager-facing complement to the 10x reports because it shows where controlled
+Adam makes more useful progress within a practical fixed step budget.
+
+For the dedicated Rastrigin basin-of-attraction benchmark, run:
+
+```bash
+MPLCONFIGDIR=/private/tmp PYTHONPATH=src:examples python examples/run_rastrigin_basin_benchmark.py \
+  --output-dir outputs/rastrigin_basin_benchmark_30starts \
+  --starts-per-radius 30 \
+  --steps 12000
+```
+
+This samples starts from boxes centered at the true minimizer `(0, 0)` and
+plots success rate versus initialization radius. It shows that controlled Adam
+improves speed inside the correct basin, but Rastrigin still requires
+multi-start or global exploration from far-away starts.
+
 ---
 
 ## 8. Run the MNIST experiment
@@ -422,6 +504,11 @@ python examples/run_mnist_demo.py \
 `--model lenet_cifar` selects a classic LeNet-style CIFAR-10 CNN:
 `Conv2d(3->6, 5x5) -> ReLU -> MaxPool -> Conv2d(6->16, 5x5) -> ReLU ->
 MaxPool -> Linear(400->120) -> Linear(120->84) -> Linear(84->10)`.
+`--model resnet_cifar` selects a compact CIFAR-style ResNet with a `3x3`
+stride-1 stem, residual stages of width `16`, `32`, and `64`, two basic blocks
+per stage, adaptive average pooling, and a 10-class linear head. This model has
+`175258` trainable parameters and is intended for staged ResNet smoke/medium
+benchmarks before any large CIFAR run.
 If CIFAR-10 is already extracted under `data/`, `--download` is not required.
 For CIFAR-10, training uses random augmentation while train/test metrics use
 deterministic normalized evaluation transforms on the same subset indices.
@@ -486,6 +573,43 @@ Recent CIFAR-10 observations:
   simply too conservative. Recommended first candidate: `alpha_min=9e-4`,
   `alpha_max=1.5e-3`, `rho_star=0.75`, `rho_beta=0.90`, `kp=0.02`,
   `min_alpha_factor=0.98`, and `max_alpha_factor=1.015`.
+- The Fashion-MNIST CNN candidate sweep showed Candidate A was the best of the
+  three tuned settings, Candidate C was close behind, and Candidate B was too
+  aggressive. This argues against continuing to tune only this CNN family.
+- A 3-epoch CIFAR-10 ResNet smoke run using `--model resnet_cifar` on 5k/1k
+  completed cleanly with the balanced Adam-scale setting. Final test accuracy
+  was `0.3610` for vanilla Adam, `0.3730` for fixed Adam-direction, `0.4100`
+  for raw-rho, and `0.3800` for both EMA variants. All controlled variants
+  accepted every step and kept alpha near `1e-3`.
+- A follow-up 20-epoch CIFAR-10 ResNet benchmark on 10k train / 2k test
+  completed with per-epoch checkpoints and progress prints. Final / best test
+  accuracy was: vanilla Adam `0.6915 / 0.6915`, fixed Adam-direction
+  `0.6875 / 0.6975`, raw-rho `0.7395 / 0.7395`, EMA `0.7135 / 0.7135`, and
+  EMA-trust `0.7135 / 0.7135`. All controlled/fixed variants accepted every
+  step; controlled variants reached the `alpha_max=1.5e-3` cap.
+- A higher-cap ResNet follow-up (`alpha_max=1.75e-3`, `rho_star=0.82`,
+  `kp=0.015`) was worse: raw-rho finished `0.7120`, while EMA and EMA-trust
+  finished `0.6695`.
+- A stronger fixed-LR control (`lr=1.5e-3`, `alpha_max=1.5e-3`) improved
+  vanilla Adam to `0.7065`, but did not explain the original raw-rho gain:
+  fixed Adam-direction best was `0.7040`, raw-rho finished `0.6985`, and
+  EMA/EMA-trust finished `0.7250`. This suggests the controller trajectory
+  from `1e-3` up to the cap matters, not just the final cap value.
+- A three-seed validation of the original balanced ResNet setting gave mean
+  final test accuracy: vanilla Adam `0.6887`, fixed Adam-direction `0.6938`,
+  raw-rho `0.7150`, EMA `0.7083`, and EMA-trust `0.7083`. Mean best test
+  accuracy was: vanilla `0.6998`, fixed `0.7118`, raw-rho `0.7235`, EMA
+  `0.7190`, and EMA-trust `0.7190`. This supports a modest controlled
+  advantage, while showing the seed `123` raw-rho result was unusually strong.
+- In that three-seed summary, `controlled_ema_trust` was exactly identical to
+  `controlled_ema` because the trust-region expansion branch never fired:
+  `0/1580` expansions for each of seeds `123`, `456`, and `789`. The reason is
+  the balanced CIFAR config used `alpha_min=1e-3` but left
+  `trust_region_alpha_threshold=1e-4`, so the "alpha is tiny" trigger was below
+  the allowed alpha floor. Future trust-region CIFAR tests should set the trust
+  threshold near the active floor, for example `1.0e-3` to `1.05e-3`, and use a
+  modest expansion factor such as `1.1` or `1.2` rather than relying on the
+  default `1.5`.
 - In all of these 20k/5k runs, the controlled variants accepted essentially all
   steps and never needed backtracking, so the controller behaved more like a
   smooth alpha governor than a strict gate.
@@ -644,6 +768,15 @@ backtracking, the next-alpha multiplier is at least
 `trust_region_expand_factor`. This mirrors classical trust-region logic:
 expand the radius only when the local model is reliable and the step appears to
 be limited by the current radius.
+
+Important parameter compatibility note: the trust threshold must be on the same
+scale as the allowed alpha range. If `alpha_min=1e-3` and
+`trust_region_alpha_threshold=1e-4`, the trust-region branch cannot activate
+because the optimizer is not allowed to use an alpha that small. In that regime
+`controlled_ema_trust` is effectively the same algorithm as `controlled_ema`.
+For Adam-scale CIFAR tests with `alpha_min=1e-3`, a meaningful trust test should
+use a threshold near the floor, such as `trust_region_alpha_threshold=1e-3` or
+`1.05e-3`.
 
 ---
 

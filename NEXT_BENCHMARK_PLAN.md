@@ -1,6 +1,24 @@
 # Next Benchmark Plan
 
-Last updated: 2026-05-22
+Last updated: 2026-05-24
+
+Note: for manager-facing deterministic function optimization results, use the
+new tracked guide `FUNCTION_OPTIMIZATION_BENCHMARK_SUITE.md` and the report
+runner `controlled_adam_project/examples/run_function_benchmark_report.py`.
+This plan remains focused on neural-network and architecture-transfer
+benchmarks.
+
+Implementation note: future Muon neural-network benchmarks should use only the
+official-style Muon paths. The older all-parameter local Muon baseline was
+incorrect for neural networks and should be ignored. Official-style Muon means
+Muon on 2D hidden matrix parameters and AdamW-style fallback for vectors,
+scalars, norms, biases, embeddings, heads, and convolution kernels.
+
+Output note: previous results were archived under
+`outputs/backup_20260526_182414/`,
+`controlled_adam_project/outputs/backup_20260526_182414/`, and
+`controlled_muon_project/outputs/backup_20260526_182414/`. Put new benchmark
+runs in fresh top-level output folders outside those backups.
 
 This document lays out the next benchmark direction for the adaptive
 same-minibatch controller work. The goal is to test whether the controlled
@@ -337,7 +355,7 @@ which already takes about `50-65s` per epoch per variant. A full 20-epoch,
 
 Recommended staging before any large ResNet run:
 
-1. Smoke run: 3 epochs, 5k train / 1k test, full ablation.
+1. Smoke run: 3 epochs, 5k train / 1k test, full ablation. Completed.
 2. Medium run: 10 epochs, 10k train / 2k test, preferably only
    `vanilla_adam`, `fixed_adam_direction`, and `controlled_raw_rho`.
 3. Large run: only if the first two stages show reasonable runtime and signal.
@@ -345,6 +363,214 @@ Recommended staging before any large ResNet run:
 For the current machine, a Fashion-MNIST CNN is likely a better next test than
 CIFAR ResNet because it adds architecture variation without the same runtime
 risk.
+
+## CIFAR ResNet Smoke Result
+
+Added `--model resnet_cifar`, implemented as `SmallCIFARResNet`:
+
+```text
+Input: 3 x 32 x 32
+Conv2d(3 -> 16, kernel_size=3, stride=1, padding=1)
+BatchNorm2d
+ReLU
+2 residual blocks at width 16
+2 residual blocks at width 32, first block stride 2
+2 residual blocks at width 64, first block stride 2
+AdaptiveAvgPool2d(1, 1)
+Linear(64 -> 10)
+```
+
+The model has `175258` trainable parameters.
+
+Smoke run:
+
+```text
+dataset = CIFAR-10
+model = resnet_cifar
+train_subset = 5000
+test_subset = 1000
+epochs = 3
+batch_size = 128
+seed = 123
+lr = 1e-3
+controller = balanced Adam-scale setting
+output = controlled_adam_project/outputs/cifar10_resnet_smoke_5k_1k_3epoch_balanced/
+```
+
+Controller settings:
+
+```text
+alpha_min = 1e-3
+alpha_max = 1.5e-3
+rho_star = 0.80
+rho_beta = 0.90
+kp = 0.02
+min_alpha_factor = 0.98
+max_alpha_factor = 1.015
+```
+
+Final test accuracy:
+
+```text
+vanilla_adam          0.3610
+fixed_adam_direction 0.3730
+controlled_raw_rho   0.4100
+controlled_ema       0.3800
+controlled_ema_trust 0.3800
+```
+
+Diagnostics:
+
+- all controlled variants accepted every step;
+- final mean alpha stayed near `1e-3`;
+- raw-rho showed the strongest early signal;
+- the run completed successfully, so the staged ResNet path is viable.
+
+## CIFAR ResNet 20-Epoch Staged Result
+
+After the smoke run, we ran the same compact ResNet on a larger CIFAR-10
+subset for 20 epochs:
+
+```text
+dataset = CIFAR-10
+model = resnet_cifar
+train_subset = 10000
+test_subset = 2000
+epochs = 20
+batch_size = 128
+seed = 123
+lr = 1e-3
+controller = balanced Adam-scale setting
+output = controlled_adam_project/outputs/cifar10_resnet_10k_2k_20epoch_balanced/
+```
+
+Final / best test accuracy:
+
+```text
+vanilla_adam          final 0.6915  best 0.6915 at epoch 20
+fixed_adam_direction final 0.6875  best 0.6975 at epoch 19
+controlled_raw_rho   final 0.7395  best 0.7395 at epoch 20
+controlled_ema       final 0.7135  best 0.7135 at epoch 20
+controlled_ema_trust final 0.7135  best 0.7135 at epoch 20
+```
+
+Final diagnostics:
+
+```text
+fixed_adam_direction mean_alpha 0.001000  mean_rho 0.8853  accepted 1.0000
+controlled_raw_rho   mean_alpha 0.001500  mean_rho 0.8821  accepted 1.0000
+controlled_ema       mean_alpha 0.001500  mean_rho 0.8768  accepted 1.0000
+controlled_ema_trust mean_alpha 0.001500  mean_rho 0.8768  accepted 1.0000
+```
+
+Interpretation:
+
+- This is the strongest Adam-controller architecture-transfer signal so far:
+  raw-rho beat vanilla Adam and fixed Adam-direction by a visible margin on the
+  10k/2k ResNet run.
+- The controller overhead was manageable enough for this staged CPU benchmark,
+  but controlled variants took longer than vanilla because they include the
+  same-minibatch trial forward pass and diagnostics.
+- All controlled variants accepted every step, so the useful behavior here was
+  mainly alpha adaptation rather than rejection/backtracking.
+- EMA smoothing reduced the final gain relative to raw-rho. EMA-trust was
+  identical to EMA, meaning the trust expansion path was not active under this
+  cap.
+- Later diagnostic check: `controlled_ema_trust` recorded `0/1580` trust
+  expansions for each balanced ResNet seed (`123`, `456`, and `789`). The
+  specific reason was parameter mismatch: `alpha_min=1e-3` but
+  `trust_region_alpha_threshold=1e-4`, so the trust trigger was below the
+  allowed alpha floor.
+
+Recommended next ResNet tests:
+
+1. Multi-seed 20-epoch 10k/2k ResNet run if runtime is acceptable.
+2. Cap ablation around `alpha_max = 1.25e-3`, `1.5e-3`, and `1.75e-3` for
+   raw-rho and EMA only.
+3. A reduced-variant longer run, such as vanilla Adam, fixed Adam-direction,
+   and raw-rho for 40 epochs, to see whether the raw-rho advantage persists.
+
+## CIFAR ResNet Follow-Up Parameter Tests
+
+Candidate 1 higher-cap test:
+
+```text
+alpha_min = 1e-3
+alpha_max = 1.75e-3
+rho_star = 0.82
+rho_beta = 0.90
+kp = 0.015
+factor clip = [0.98, 1.012]
+```
+
+Result on the same 20-epoch 10k/2k ResNet setup:
+
+```text
+controlled_raw_rho   final 0.7120  best 0.7120
+controlled_ema       final 0.6695  best 0.6915
+controlled_ema_trust final 0.6695  best 0.6915
+```
+
+Conclusion: the higher cap was worse than the balanced `alpha_max=1.5e-3`
+setting.
+
+Stronger fixed-LR control:
+
+```text
+lr = 1.5e-3
+alpha_min = 1e-3
+alpha_max = 1.5e-3
+rho_star = 0.80
+rho_beta = 0.90
+kp = 0.02
+factor clip = [0.98, 1.015]
+```
+
+Result:
+
+```text
+vanilla_adam          final 0.7065  best 0.7065
+fixed_adam_direction final 0.6905  best 0.7040
+controlled_raw_rho   final 0.6985  best 0.6985
+controlled_ema       final 0.7250  best 0.7250
+controlled_ema_trust final 0.7250  best 0.7250
+```
+
+Conclusion: a larger fixed Adam learning rate improves vanilla Adam, but it
+does not explain the original raw-rho `0.7395` result. Starting at the cap is
+not equivalent to ramping there from `1e-3`. The next most informative test is
+therefore multi-seed validation of the original balanced `lr=1e-3`,
+`alpha_max=1.5e-3` schedule.
+
+## CIFAR ResNet Balanced Multi-Seed Result
+
+The original balanced setting was evaluated on seeds `123`, `456`, and `789`.
+
+Three-seed aggregate:
+
+```text
+vanilla_adam          final 0.6887 +/- 0.0145  best 0.6998 +/- 0.0076
+fixed_adam_direction final 0.6938 +/- 0.0150  best 0.7118 +/- 0.0148
+controlled_raw_rho   final 0.7150 +/- 0.0226  best 0.7235 +/- 0.0147
+controlled_ema       final 0.7083 +/- 0.0140  best 0.7190 +/- 0.0055
+controlled_ema_trust final 0.7083 +/- 0.0140  best 0.7190 +/- 0.0055
+```
+
+Conclusion:
+
+- Controlled variants retain a modest mean advantage over vanilla and fixed
+  Adam-direction.
+- Raw-rho has the best mean final and best accuracy, but its seed-to-seed
+  variance is larger.
+- EMA and EMA-trust are slightly lower on mean accuracy but more stable.
+- EMA-trust was exactly identical to EMA because trust expansion did not fire:
+  `0/1580` expansions for each of the three seeds. This should be interpreted
+  as a dormant trust hook, not as a real test of the trust-region mechanism.
+- The original seed `123` raw-rho result was unusually strong, so future claims
+  should use multi-seed aggregates rather than single-run peaks.
+- Next useful trust-specific test: keep the Adam-scale floor but move
+  `trust_region_alpha_threshold` near that floor, for example `1e-3` to
+  `1.05e-3`, and use a gentle expansion factor such as `1.1` or `1.2`.
 
 ## First Fashion-MNIST CNN Result
 
@@ -484,6 +710,100 @@ Purpose:
 - Checks whether the controller can provide diagnostics and mild correction
   without drifting away from the baseline Adam scale.
 
+## Candidate C Fashion-MNIST CNN Result
+
+We ran Candidate C on three seeds (`123`, `456`, `789`) for Fashion-MNIST CNN,
+20k/5k, 20 epochs. Candidate C was the near-fixed Adam controller.
+
+Candidate C settings:
+
+```text
+alpha_min = 9.5e-4
+alpha_max = 1.25e-3
+rho_star = 0.75
+rho_beta = 0.90
+kp = 0.01
+min_alpha_factor = 0.995
+max_alpha_factor = 1.005
+```
+
+Three-seed aggregate final test accuracy:
+
+```text
+vanilla_adam          0.8946 +/- 0.0084
+fixed_adam_direction 0.8960 +/- 0.0084
+controlled_raw_rho   0.8951 +/- 0.0089
+controlled_ema       0.8937 +/- 0.0092
+controlled_ema_trust 0.8937 +/- 0.0092
+```
+
+Three-seed aggregate best test accuracy:
+
+```text
+vanilla_adam          0.8965 +/- 0.0057
+fixed_adam_direction 0.8977 +/- 0.0056
+controlled_raw_rho   0.8978 +/- 0.0062
+controlled_ema       0.8974 +/- 0.0063
+controlled_ema_trust 0.8974 +/- 0.0063
+```
+
+Compared with Candidate A on the same three seeds, Candidate C nudged raw-rho
+slightly higher and kept alpha even closer to the Adam baseline, but the EMA
+variants slipped a little. It remained below fixed Adam-direction on mean final
+accuracy.
+
+Interpretation:
+
+- Candidate C confirms that simply pinning alpha near Adam scale is not enough
+  to beat fixed Adam-direction on Fashion-MNIST CNN.
+- Raw-rho appears to be the most resilient controlled variant in this regime.
+- The next Fashion-MNIST CNN test should probably move to a different dataset
+  or architecture rather than tuning this CNN endlessly.
+
+## Candidate B Fashion-MNIST CNN Result
+
+We also ran Candidate B on the same three seeds. This was the more aggressive
+recovery setting.
+
+Candidate B settings:
+
+```text
+alpha_min = 8e-4
+alpha_max = 1.5e-3
+rho_star = 0.70
+rho_beta = 0.90
+kp = 0.03
+min_alpha_factor = 0.98
+max_alpha_factor = 1.02
+```
+
+Three-seed aggregate final test accuracy:
+
+```text
+vanilla_adam          0.8946 +/- 0.0084
+fixed_adam_direction 0.8960 +/- 0.0084
+controlled_raw_rho   0.8921 +/- 0.0064
+controlled_ema       0.8930 +/- 0.0078
+controlled_ema_trust 0.8930 +/- 0.0078
+```
+
+Three-seed aggregate best test accuracy:
+
+```text
+vanilla_adam          0.8965 +/- 0.0057
+fixed_adam_direction 0.8977 +/- 0.0056
+controlled_raw_rho   0.8941 +/- 0.0052
+controlled_ema       0.8949 +/- 0.0063
+controlled_ema_trust 0.8949 +/- 0.0063
+```
+
+Interpretation:
+
+- Candidate B was too aggressive.
+- It pushed raw-rho below both Candidate A and Candidate C.
+- This is a strong hint that the next step should move away from Fashion-MNIST
+  CNN tuning and toward the staged CIFAR ResNet smoke test.
+
 ## Decision Criteria
 
 The controller looks promising if it:
@@ -502,11 +822,17 @@ The controller looks architecture-specific if:
 - EMA and trust variants repeatedly collapse to the same trajectory without
   distinct behavior.
 
+However, identical EMA and EMA-trust trajectories only count as evidence
+against the trust-region idea if the trust branch was reachable. If
+`trust_region_alpha_threshold` is below `alpha_min`, the branch is unreachable by
+construction and the run only tests EMA-rho.
+
 ## Current Recommendation
 
 Do not keep tuning only the current `SmallCIFARCNN` CIFAR-10 setup. The first
-LeNet architecture test did not favor the controller, and the first
-Fashion-MNIST CNN multi-seed run showed that the CIFAR-derived setting was too
-conservative. The next cheapest useful experiment is Candidate A on
-Fashion-MNIST CNN, probably for three seeds first. CIFAR ResNet should still be
-staged as a smoke run before any large ablation.
+LeNet architecture test did not favor the controller, and the Fashion-MNIST CNN
+candidate sweep now shows a clear pattern: Candidate A was the best of the
+three, Candidate C was close behind, and Candidate B was worse. The CIFAR
+ResNet smoke run completed cleanly and showed a positive raw-rho early signal.
+The next useful experiment is the staged 10-epoch 10k/2k ResNet run with the
+same balanced settings.

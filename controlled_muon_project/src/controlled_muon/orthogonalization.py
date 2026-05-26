@@ -8,8 +8,9 @@ import numpy as np
 def orthogonalize(
     matrix: np.ndarray,
     method: str = "newton_schulz",
-    ns_steps: int = 8,
-    eps: float = 1e-12,
+    ns_steps: int = 5,
+    eps: float = 1e-7,
+    ns_coefficients: tuple[float, float, float] = (3.4445, -4.7750, 2.0315),
 ) -> np.ndarray:
     """Return an approximate polar factor of a 2D matrix.
 
@@ -20,20 +21,19 @@ def orthogonalize(
     method:
         Either ``"newton_schulz"`` or ``"svd"``.
     ns_steps:
-        Number of Newton-Schulz polar iterations.
+        Number of Newton-Schulz quintic iterations.
     eps:
         Small value for numerical stability.
+    ns_coefficients:
+        Quintic Newton-Schulz coefficients. The defaults match PyTorch Muon's
+        implementation.
 
     Notes
     -----
-    The SVD version returns the exact polar factor ``U @ Vt``.
-    The Newton-Schulz version is a compact educational implementation of the
-    polar iteration
-
-        X <- 1/2 X (3I - X^T X),
-
-    after normalization. It is not intended to be the fastest possible GPU
-    implementation.
+    The SVD version returns the exact polar factor ``U @ Vt``. The
+    Newton-Schulz version uses the same quintic iteration and default
+    coefficients as PyTorch Muon, implemented here in NumPy for the educational
+    demos.
     """
     X = np.asarray(matrix, dtype=float)
     if X.ndim != 2:
@@ -45,7 +45,12 @@ def orthogonalize(
     if method == "svd":
         return _orthogonalize_svd(X)
     if method == "newton_schulz":
-        return _orthogonalize_newton_schulz(X, ns_steps=ns_steps, eps=eps)
+        return _orthogonalize_newton_schulz(
+            X,
+            ns_steps=ns_steps,
+            eps=eps,
+            coefficients=ns_coefficients,
+        )
     raise ValueError("method must be either 'newton_schulz' or 'svd'.")
 
 
@@ -59,24 +64,26 @@ def _orthogonalize_newton_schulz(
     X: np.ndarray,
     ns_steps: int,
     eps: float,
+    coefficients: tuple[float, float, float],
 ) -> np.ndarray:
-    """Approximate polar factor using Newton-Schulz iteration."""
+    """Approximate the Muon zeroth-power update using quintic Newton-Schulz."""
     if ns_steps <= 0:
         raise ValueError("ns_steps must be positive.")
+    if len(coefficients) != 3:
+        raise ValueError("coefficients must contain exactly three values.")
 
-    # The simple polar iteration below is easiest when rows >= columns.
     transposed = False
-    if X.shape[0] < X.shape[1]:
+    if X.shape[0] > X.shape[1]:
         X = X.T
         transposed = True
 
-    # Frobenius normalization keeps the largest singular value <= 1.
-    Y = X / (np.linalg.norm(X, ord="fro") + eps)
+    Y = X / max(np.linalg.norm(X, ord="fro"), eps)
+    a, b, c = coefficients
 
-    n_cols = Y.shape[1]
-    I = np.eye(n_cols)
     for _ in range(ns_steps):
-        Y = 0.5 * Y @ (3.0 * I - Y.T @ Y)
+        A = Y @ Y.T
+        B = b * A + c * (A @ A)
+        Y = a * Y + B @ Y
 
     if transposed:
         Y = Y.T

@@ -80,6 +80,13 @@ controlled_muon_project/src/controlled_muon/orthogonalization.py
 controlled_muon_project/examples/run_mnist_demo.py
 ```
 
+Current Muon note: neural-network Muon paths have since been aligned with
+`torch.optim.Muon` scope. Muon is applied only to 2D hidden matrix parameters by
+default; vectors, scalars, norms, biases, embeddings, heads, and convolution
+kernels use AdamW-style fallback updates. Historical benchmark tables in this
+report predate that cleanup and should be treated as archival unless the output
+folder name explicitly says `official_muon`.
+
 Deterministic 2D Adam implementation:
 
 ```text
@@ -355,10 +362,11 @@ Adam behavior:
 
 Muon behavior:
 
-- Uses the project’s educational Muon-style update implementation with fixed
-  learning rate `lr`.
-- The implementation orthogonalizes parameter update directions. It is useful
-  for research experiments but CPU-heavy, especially for CIFAR-10.
+- Uses the project’s official-style Muon update with fixed learning rate `lr`.
+- Muon applies to 2D hidden matrix parameters; non-2D and excluded parameters
+  use AdamW-style fallback updates.
+- The implementation is useful for research experiments but CPU-heavy,
+  especially for CIFAR-10.
 
 ### 2.2 Fixed Direction Through the Controller Path
 
@@ -947,6 +955,15 @@ controlled_ema:       alpha saturated at 0.0015, accepted 100%
 controlled_ema_trust: identical to controlled_ema, trust_expansions 0
 ```
 
+Important trust-region caveat: for the balanced CIFAR ResNet Adam runs, the
+trust hook was unreachable under the chosen alpha bounds. The config used
+`alpha_min=1e-3` and `alpha_max=1.5e-3`, but the trust trigger was
+`trust_region_alpha_threshold=1e-4`. Since the trigger was below the hard floor,
+`controlled_ema_trust` recorded `0/1580` trust expansions for each of seeds
+`123`, `456`, and `789`. Therefore the EMA+trust numbers in this setting should
+be read as EMA-rho with a dormant trust hook, not as an active test of the
+trust-region expansion idea.
+
 Interpretation:
 
 - The larger subset made CIFAR performance much more plausible.
@@ -1128,8 +1145,10 @@ Interpretation:
 
 3. EMA and EMA-trust usually matched.
 
-   Trust expansion did not fire in the main Muon runs. This means EMA-trust was
-   effectively just EMA in those experiments.
+   Trust expansion did not fire in the main Muon runs, and it also did not fire
+   in the balanced CIFAR ResNet Adam summary when
+   `trust_region_alpha_threshold=1e-4` was below `alpha_min=1e-3`. This means
+   EMA-trust was effectively just EMA in those experiments.
 
 4. Muon needs separate tuning from Adam.
 
@@ -1263,5 +1282,8 @@ The current evidence says:
   controller found a much larger useful alpha.
 - Trust-region recovery is useful for Adam when alpha collapse is the failure
   mode, but irrelevant when alpha is already at the cap or when trust expansion
-  does not fire.
+  does not fire. A future Adam-scale trust test should make the trust threshold
+  compatible with the active floor, for example
+  `trust_region_alpha_threshold=1e-3` to `1.05e-3` when `alpha_min=1e-3`, and
+  should use a gentle expansion factor such as `1.1` or `1.2`.
 - Future claims should be based on multi-seed, wall-clock-aware benchmarks.

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Sequence
 
 import numpy as np
 import torch
@@ -38,8 +38,9 @@ class MuonConfig:
         momentum: float = 0.95,
         nesterov: bool = True,
         orthogonalizer: str = "newton_schulz",
-        ns_steps: int = 8,
+        ns_steps: int = 5,
         update_scale: float = 1.0,
+        shape_scale: bool = True,
     ) -> None:
         if not 0 <= momentum < 1:
             raise ValueError("momentum must satisfy 0 <= momentum < 1.")
@@ -52,6 +53,34 @@ class MuonConfig:
         self.orthogonalizer = orthogonalizer
         self.ns_steps = ns_steps
         self.update_scale = update_scale
+        self.shape_scale = shape_scale
+
+
+def default_muon_param_groups(
+    named_parameters: Iterable[tuple[str, torch.nn.Parameter]],
+    *,
+    adamw_name_keywords: Sequence[str] = (
+        "embed",
+        "embedding",
+        "lm_head",
+        "head",
+        "norm",
+        "bias",
+        "bn",
+    ),
+) -> tuple[list[torch.nn.Parameter], list[torch.nn.Parameter]]:
+    """Split model parameters into official-style Muon and AdamW fallback params."""
+    muon_params: list[torch.nn.Parameter] = []
+    adamw_params: list[torch.nn.Parameter] = []
+    for name, param in named_parameters:
+        if not param.requires_grad:
+            continue
+        excluded_by_name = any(keyword in name.lower() for keyword in adamw_name_keywords)
+        if param.ndim == 2 and not excluded_by_name:
+            muon_params.append(param)
+        else:
+            adamw_params.append(param)
+    return muon_params, adamw_params
 
 
 class TorchControlledMuon:
@@ -59,7 +88,7 @@ class TorchControlledMuon:
 
     def __init__(
         self,
-        params: Iterable[torch.nn.Parameter],
+        params: Iterable[torch.nn.Parameter] | tuple[list[torch.nn.Parameter], list[torch.nn.Parameter]],
         alpha0: float = 1e-2,
         config: MuonConfig | None = None,
         kp: float = 0.05,
@@ -80,6 +109,9 @@ class TorchControlledMuon:
         trust_region_rho_threshold: float = 0.9,
         trust_region_alpha_threshold: float = 1e-4,
         trust_region_expand_factor: float = 1.5,
+        adam_betas: tuple[float, float] = (0.9, 0.999),
+        adam_eps: float = 1e-8,
+        weight_decay: float = 0.0,
     ) -> None:
         if alpha0 <= 0:
             raise ValueError("alpha0 must be positive.")
@@ -105,8 +137,17 @@ class TorchControlledMuon:
             raise ValueError("trust_region_alpha_threshold must be positive.")
         if trust_region_expand_factor <= 1.0:
             raise ValueError("trust_region_expand_factor must be > 1.")
+        if weight_decay < 0.0:
+            raise ValueError("weight_decay must be non-negative.")
 
-        self.params = [param for param in params if param.requires_grad]
+        if isinstance(params, tuple):
+            muon_params, adamw_params = params
+            self.muon_params = [param for param in muon_params if param.requires_grad]
+            self.adamw_params = [param for param in adamw_params if param.requires_grad]
+        else:
+            self.muon_params = [param for param in params if param.requires_grad and param.ndim == 2]
+            self.adamw_params = [param for param in params if param.requires_grad and param.ndim != 2]
+        self.params = [*self.muon_params, *self.adamw_params]
         if not self.params:
             raise ValueError("TorchControlledMuon requires at least one parameter.")
 
@@ -130,22 +171,24 @@ class TorchControlledMuon:
         self.trust_region_rho_threshold = trust_region_rho_threshold
         self.trust_region_alpha_threshold = trust_region_alpha_threshold
         self.trust_region_expand_factor = trust_region_expand_factor
+        self.adam_betas = adam_betas
+        self.adam_eps = adam_eps
+        self.weight_decay = float(weight_decay)
         self.rho_ema: float | None = None
         self.step_count = 0
-        self.momentum = [torch.zeros_like(param) for param in self.params]
+        self.momentum = {param: torch.zeros_like(param) for param in self.muon_params}
+        self.adam_state: dict[torch.nn.Parameter, dict[str, torch.Tensor | int]] = {
+            param: {} for param in self.adamw_params
+        }
 
     @staticmethod
     def _tensor_to_matrix(tensor: torch.Tensor) -> tuple[np.ndarray, tuple[int, ...]]:
         """Flatten a tensor to a 2D matrix for Muon-style orthogonalization."""
         shape = tuple(tensor.shape)
-        if tensor.ndim == 0:
-            raise ValueError("Muon parameters must have at least one dimension.")
-        if tensor.ndim == 1:
-            matrix = tensor.detach().cpu().numpy().reshape(-1, 1)
-        elif tensor.ndim == 2:
+        if tensor.ndim == 2:
             matrix = tensor.detach().cpu().numpy()
         else:
-            matrix = tensor.detach().cpu().numpy().reshape(tensor.shape[0], -1)
+            raise ValueError("Official-style Muon supports only 2D tensors.")
         return matrix, shape
 
     @staticmethod
@@ -157,9 +200,9 @@ class TorchControlledMuon:
             param.grad = None
 
     def _direction(self, grad: torch.Tensor, momentum_buffer: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        new_momentum = self.config.momentum * momentum_buffer + grad
+        new_momentum = momentum_buffer.lerp(grad, 1.0 - self.config.momentum)
         if self.config.nesterov:
-            matrix_to_orthogonalize = self.config.momentum * new_momentum + grad
+            matrix_to_orthogonalize = grad.lerp(new_momentum, self.config.momentum)
         else:
             matrix_to_orthogonalize = new_momentum
         matrix, shape = self._tensor_to_matrix(matrix_to_orthogonalize)
@@ -168,6 +211,9 @@ class TorchControlledMuon:
             method=self.config.orthogonalizer,
             ns_steps=self.config.ns_steps,
         )
+        if self.config.shape_scale:
+            rows, cols = matrix.shape
+            ortho_update = ortho_update * np.sqrt(max(1.0, rows / max(cols, 1)))
         direction = -self.config.update_scale * self._matrix_to_tensor(
             ortho_update,
             shape,
@@ -175,6 +221,29 @@ class TorchControlledMuon:
             dtype=grad.dtype,
         )
         return direction, new_momentum
+
+    def _adamw_direction(
+        self,
+        grad: torch.Tensor,
+        state: dict[str, torch.Tensor | int],
+    ) -> torch.Tensor:
+        beta1, beta2 = self.adam_betas
+        if "step" not in state:
+            state["step"] = 0
+            state["exp_avg"] = torch.zeros_like(grad)
+            state["exp_avg_sq"] = torch.zeros_like(grad)
+        state["step"] = int(state["step"]) + 1
+        exp_avg = state["exp_avg"]
+        exp_avg_sq = state["exp_avg_sq"]
+        assert isinstance(exp_avg, torch.Tensor)
+        assert isinstance(exp_avg_sq, torch.Tensor)
+        exp_avg.mul_(beta1).add_(grad, alpha=1.0 - beta1)
+        exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
+        step = int(state["step"])
+        bias_correction1 = 1.0 - beta1**step
+        bias_correction2 = 1.0 - beta2**step
+        denom = exp_avg_sq.sqrt().div(np.sqrt(bias_correction2)).add_(self.adam_eps)
+        return -exp_avg.div(bias_correction1).div(denom)
 
     def step(
         self,
@@ -194,8 +263,16 @@ class TorchControlledMuon:
             if grad is None:
                 directions.append(None)
                 continue
-            direction, new_momentum = self._direction(grad, self.momentum[i])
-            self.momentum[i] = new_momentum
+            param = self.params[i]
+            if torch.is_complex(param) or torch.is_complex(grad):
+                raise RuntimeError("TorchControlledMuon does not support complex parameters or gradients.")
+            if grad.is_sparse:
+                raise RuntimeError("TorchControlledMuon does not support sparse gradients.")
+            if param in self.momentum:
+                direction, new_momentum = self._direction(grad, self.momentum[param])
+                self.momentum[param] = new_momentum
+            else:
+                direction = self._adamw_direction(grad, self.adam_state[param])
             directions.append(direction)
             descent_score -= float(torch.sum(grad * direction).item())
 
@@ -296,7 +373,10 @@ class TorchControlledMuon:
                 if direction is None:
                     param.copy_(original)
                 else:
-                    param.copy_(original + alpha * direction)
+                    trial = original
+                    if self.weight_decay != 0.0:
+                        trial = trial * (1.0 - alpha * self.weight_decay)
+                    param.copy_(trial + alpha * direction)
 
     def _restore_params(self, originals: list[torch.Tensor]) -> None:
         with torch.no_grad():

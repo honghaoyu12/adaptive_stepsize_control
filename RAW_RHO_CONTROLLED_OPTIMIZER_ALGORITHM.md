@@ -358,6 +358,28 @@ behavior, because `alpha_used` was already above the tiny threshold
 `1e-4`. That is why `controlled_ema` and `controlled_ema_trust` often produced
 identical curves.
 
+The threshold must also be compatible with the hard alpha floor. In the
+balanced CIFAR-10 ResNet Adam benchmark, the controller used
+`alpha_min = 1e-3` and `alpha_max = 1.5e-3`, while the trust threshold remained
+`trust_region_alpha_threshold = 1e-4`. Because `1e-4 < alpha_min`, the condition
+`alpha_used <= trust_region_alpha_threshold` was effectively unreachable. A
+diagnostic check confirmed `0/1580` trust expansions for each of seeds `123`,
+`456`, and `789`, so `controlled_ema_trust` was algorithmically identical to
+`controlled_ema` in that benchmark.
+
+For an Adam-scale experiment where the alpha floor is intentionally kept near
+the vanilla learning rate, the trust threshold should be moved near that floor:
+
+```text
+alpha_min = 1e-3
+trust_region_alpha_threshold = 1e-3 or 1.05e-3
+trust_region_expand_factor = 1.1 or 1.2
+```
+
+This makes the rule mean "if alpha is near the active floor and rho is good,
+expand gently." It is different from the older collapse-recovery setting where
+`alpha_min` could be much smaller and `1e-4` was a reachable tiny-alpha region.
+
 ## Full Pseudocode
 
 ```text

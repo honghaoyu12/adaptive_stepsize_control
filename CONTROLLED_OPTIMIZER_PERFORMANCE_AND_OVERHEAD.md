@@ -261,6 +261,19 @@ Since the neural runs start at `alpha_0 = 1e-3`, the threshold
 `alpha_used <= 1e-4` usually prevents trust expansion. This explains why
 `controlled_ema` and `controlled_ema_trust` often have identical metrics.
 
+The balanced CIFAR-10 ResNet Adam summary makes this especially clear. That run
+used `alpha_min = 1e-3` and `alpha_max = 1.5e-3`, but the trust trigger was left
+at `trust_region_alpha_threshold = 1e-4`. Because the trigger was below the hard
+floor, the trust branch could not activate; the recorded diagnostics show
+`0/1580` trust expansions for each of seeds `123`, `456`, and `789`.
+
+This is an important reporting caveat: in that benchmark, EMA+trust should not
+be presented as a distinct trust-region result. It is better described as
+EMA-rho with the trust hook enabled but dormant. A meaningful Adam-scale trust
+test should set `trust_region_alpha_threshold` near the active alpha floor, for
+example `1e-3` to `1.05e-3`, and use a modest expansion factor such as `1.1` or
+`1.2`.
+
 ## Why Similar Wall-Clock Time Is Plausible
 
 The controlled optimizer can appear almost as fast as vanilla in wall-clock

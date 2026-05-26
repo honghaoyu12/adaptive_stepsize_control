@@ -1,6 +1,6 @@
 # Development Log
 
-Last updated: 2026-05-22
+Last updated: 2026-05-24
 
 This is the chronological engineering log for `adaptive_stepsize_control`.
 
@@ -9,6 +9,22 @@ Use the project documents this way:
 - `CONVERSATION_LOG.md`: nuanced discussion history, reasoning, interpretation, and collaboration memory.
 - `DEVELOPMENT_LOG.md`: concise technical timeline of what changed, what commands were run, and what results were observed.
 - `PROJECT_HANDOFF.md`: current operating manual for another machine or coding agent.
+- `FUNCTION_OPTIMIZATION_BENCHMARK_SUITE.md`: self-contained deterministic
+  2D function benchmark suite and manager-report guide.
+
+## 0. Output Cleanup
+
+On 2026-05-26, existing experimental results were moved into timestamped
+backup folders so new runs start from uncluttered output directories:
+
+```text
+outputs/backup_20260526_182414/
+controlled_adam_project/outputs/backup_20260526_182414/
+controlled_muon_project/outputs/backup_20260526_182414/
+```
+
+The active top-level `outputs` directories now contain only `.gitkeep` plus
+that backup folder.
 
 ## 1. Root Adaptive Step-Size Project
 
@@ -316,6 +332,312 @@ Candidate A is the recommended next run because it directly tests whether
 preventing alpha from drifting below Adam scale fixes the Fashion-MNIST CNN
 underperformance.
 
+Candidate A result:
+
+- Ran Candidate A on seeds `123`, `456`, and `789` for Fashion-MNIST CNN,
+  20k/5k, 20 epochs.
+- Three-seed final test accuracy:
+
+```text
+vanilla_adam          0.8946 +/- 0.0084
+fixed_adam_direction 0.8960 +/- 0.0084
+controlled_raw_rho   0.8944 +/- 0.0074
+controlled_ema       0.8945 +/- 0.0086
+controlled_ema_trust 0.8943 +/- 0.0082
+```
+
+- Three-seed best test accuracy:
+
+```text
+vanilla_adam          0.8965 +/- 0.0057
+fixed_adam_direction 0.8977 +/- 0.0056
+controlled_raw_rho   0.8964 +/- 0.0068
+controlled_ema       0.8965 +/- 0.0069
+controlled_ema_trust 0.8963 +/- 0.0065
+```
+
+Interpretation:
+
+- Candidate A improved controlled variants compared with the prior balanced
+  setting on the same three seeds.
+- Final controlled alpha rose from about `6.8e-4` to about `8.9e-4`.
+- The improvement nearly closed the gap to vanilla/fixed Adam, but did not
+  clearly beat fixed Adam-direction.
+
+Candidate C result:
+
+- Ran Candidate C on seeds `123`, `456`, and `789` for Fashion-MNIST CNN,
+  20k/5k, 20 epochs.
+- Three-seed final test accuracy:
+
+```text
+vanilla_adam          0.8946 +/- 0.0084
+fixed_adam_direction 0.8960 +/- 0.0084
+controlled_raw_rho   0.8951 +/- 0.0089
+controlled_ema       0.8937 +/- 0.0092
+controlled_ema_trust 0.8937 +/- 0.0092
+```
+
+- Three-seed best test accuracy:
+
+```text
+vanilla_adam          0.8965 +/- 0.0057
+fixed_adam_direction 0.8977 +/- 0.0056
+controlled_raw_rho   0.8978 +/- 0.0062
+controlled_ema       0.8974 +/- 0.0063
+controlled_ema_trust 0.8974 +/- 0.0063
+```
+
+Interpretation:
+
+- Candidate C kept alpha near `9.3e-4`, so it behaved like a near-fixed Adam
+  controller.
+- Raw-rho improved a little relative to Candidate A, but the EMA-based
+  variants slipped slightly below it.
+- The controller still did not clearly beat fixed Adam-direction on mean final
+  accuracy, so the evidence still favors caution over more aggressive tuning.
+
+Candidate B result:
+
+- Ran Candidate B on seeds `123`, `456`, and `789` for Fashion-MNIST CNN,
+  20k/5k, 20 epochs.
+- Three-seed final test accuracy:
+
+```text
+vanilla_adam          0.8946 +/- 0.0084
+fixed_adam_direction 0.8960 +/- 0.0084
+controlled_raw_rho   0.8921 +/- 0.0064
+controlled_ema       0.8930 +/- 0.0078
+controlled_ema_trust 0.8930 +/- 0.0078
+```
+
+- Three-seed best test accuracy:
+
+```text
+vanilla_adam          0.8965 +/- 0.0057
+fixed_adam_direction 0.8977 +/- 0.0056
+controlled_raw_rho   0.8941 +/- 0.0052
+controlled_ema       0.8949 +/- 0.0063
+controlled_ema_trust 0.8949 +/- 0.0063
+```
+
+Interpretation:
+
+- Candidate B was the most aggressive Fashion-MNIST CNN candidate, but it was
+  worse than Candidate A and Candidate C.
+- It pushed the controller too low on alpha too quickly, especially for
+  raw-rho.
+- The best next move is probably to stop tuning this CNN family and move to the
+  staged CIFAR ResNet smoke test.
+
+CIFAR ResNet smoke test:
+
+- Added `BasicBlock` and `SmallCIFARResNet` support in
+  `controlled_adam_project/examples/run_mnist_demo.py` via
+  `--model resnet_cifar`.
+- Architecture: CIFAR-style stem (`3x3`, stride `1`, no initial max pool),
+  three residual stages with widths `16`, `32`, and `64`, two basic blocks per
+  stage, adaptive average pooling, and a linear 10-class head.
+- Trainable parameters: `175258`.
+- Ran the staged smoke test on CIFAR-10: 5k train / 1k test, 3 epochs,
+  batch size `128`, seed `123`, `lr=1e-3`, full ablation, balanced controller
+  settings (`alpha_min=1e-3`, `alpha_max=1.5e-3`, `rho_star=0.80`,
+  `rho_beta=0.90`, `kp=0.02`, factor clip `[0.98, 1.015]`).
+- Output directory:
+  `controlled_adam_project/outputs/cifar10_resnet_smoke_5k_1k_3epoch_balanced/`.
+- Final test accuracy:
+
+```text
+vanilla_adam          0.3610
+fixed_adam_direction 0.3730
+controlled_raw_rho   0.4100
+controlled_ema       0.3800
+controlled_ema_trust 0.3800
+```
+
+Interpretation:
+
+- The ResNet runner and CIFAR pipeline work.
+- Controlled variants accepted every step and kept alpha near `1e-3`.
+- Raw-rho showed the strongest early signal on this smoke run, so the next
+  staged test should be 10k/2k for 10 epochs with the same balanced settings.
+
+CIFAR ResNet 20-epoch staged benchmark:
+
+- Ran a larger single-seed CIFAR-10 ResNet benchmark after the smoke test:
+  10k train / 2k test, 20 epochs, batch size `128`, seed `123`, `lr=1e-3`,
+  full ablation, same balanced controller settings
+  (`alpha_min=1e-3`, `alpha_max=1.5e-3`, `rho_star=0.80`,
+  `rho_beta=0.90`, `kp=0.02`, factor clip `[0.98, 1.015]`).
+- Output directory:
+  `controlled_adam_project/outputs/cifar10_resnet_10k_2k_20epoch_balanced/`.
+- The run used `--checkpoint-every 1` and `--print-every 1`, so it produced
+  one checkpoint per epoch per variant plus progress logs.
+- Final / best test accuracy:
+
+```text
+vanilla_adam          final 0.6915  best 0.6915 at epoch 20
+fixed_adam_direction final 0.6875  best 0.6975 at epoch 19
+controlled_raw_rho   final 0.7395  best 0.7395 at epoch 20
+controlled_ema       final 0.7135  best 0.7135 at epoch 20
+controlled_ema_trust final 0.7135  best 0.7135 at epoch 20
+```
+
+- Final diagnostics:
+
+```text
+fixed_adam_direction mean_alpha 0.001000  mean_rho 0.8853  accepted 1.0000
+controlled_raw_rho   mean_alpha 0.001500  mean_rho 0.8821  accepted 1.0000
+controlled_ema       mean_alpha 0.001500  mean_rho 0.8768  accepted 1.0000
+controlled_ema_trust mean_alpha 0.001500  mean_rho 0.8768  accepted 1.0000
+```
+
+Interpretation:
+
+- Raw-rho gave the strongest result so far on the staged ResNet architecture,
+  beating vanilla Adam by about `4.8` percentage points in final test accuracy
+  on this subset/seed.
+- EMA and EMA-trust beat vanilla Adam but underperformed raw-rho.
+- EMA and EMA-trust were identical, so the trust-region hook was dormant or
+  saturated by the tight `alpha_max=1.5e-3` cap.
+- Every controlled/fixed trial step was accepted. The alpha gate did not act as
+  a rejection-heavy line search here; it mainly allowed a controlled ramp from
+  Adam scale to the cap.
+- This is still a single-seed, subset-limited result and should be followed by
+  a multi-seed ResNet test or a cap/schedule ablation before making strong
+  claims.
+
+CIFAR ResNet Candidate 1 higher-cap test:
+
+- Tested a slightly higher cap on the same 20-epoch 10k/2k ResNet setup:
+  `alpha_min=1e-3`, `alpha_max=1.75e-3`, `rho_star=0.82`,
+  `rho_beta=0.90`, `kp=0.015`, factor clip `[0.98, 1.012]`.
+- Output directory:
+  `controlled_adam_project/outputs/cifar10_resnet_10k_2k_20epoch_candidate1_higher_cap/`.
+- Final / best test accuracy:
+
+```text
+vanilla_adam          final 0.6915  best 0.6915 at epoch 20
+fixed_adam_direction final 0.6875  best 0.6975 at epoch 19
+controlled_raw_rho   final 0.7120  best 0.7120 at epoch 20
+controlled_ema       final 0.6695  best 0.6915 at epoch 17
+controlled_ema_trust final 0.6695  best 0.6915 at epoch 17
+```
+
+Interpretation:
+
+- Candidate 1 was worse than the balanced `alpha_max=1.5e-3` setting.
+- The higher cap did not improve generalization. Raw-rho still beat vanilla
+  Adam but lost the strong `0.7395` result from the balanced run.
+- EMA and EMA-trust saturated at `1.75e-3` and performed worse.
+
+CIFAR ResNet stronger fixed-LR control:
+
+- Tested whether the original raw-rho gain was simply because Adam wanted a
+  larger fixed learning rate. Used the same 20-epoch 10k/2k ResNet setup with
+  `lr=1.5e-3`, `alpha_min=1e-3`, `alpha_max=1.5e-3`,
+  `rho_star=0.80`, `rho_beta=0.90`, `kp=0.02`, factor clip
+  `[0.98, 1.015]`.
+- Output directory:
+  `controlled_adam_project/outputs/cifar10_resnet_10k_2k_20epoch_lr15e4_control/`.
+- Final / best test accuracy:
+
+```text
+vanilla_adam          final 0.7065  best 0.7065 at epoch 20
+fixed_adam_direction final 0.6905  best 0.7040 at epoch 18
+controlled_raw_rho   final 0.6985  best 0.6985 at epoch 20
+controlled_ema       final 0.7250  best 0.7250 at epoch 20
+controlled_ema_trust final 0.7250  best 0.7250 at epoch 20
+```
+
+Interpretation:
+
+- Vanilla Adam at `1.5e-3` is a stronger baseline than vanilla Adam at
+  `1e-3`, but it still did not match the original raw-rho `0.7395` result.
+- Fixed Adam-direction at `1.5e-3` also did not explain the original raw-rho
+  gain; its best was `0.7040`.
+- Starting the controlled run at/near the cap was worse for raw-rho than
+  starting at `1e-3` and ramping upward.
+- EMA/EMA-trust did best in this control run at `0.7250`, but still trailed
+  the original raw-rho balanced run.
+- This supports the hypothesis that the ramp schedule / controller trajectory
+  matters, not only the final `1.5e-3` scale.
+
+CIFAR ResNet balanced multi-seed validation:
+
+- Ran the original balanced ResNet setting for seeds `456` and `789`, and
+  combined those results with the existing seed `123` run.
+- Shared setup: CIFAR-10, `resnet_cifar`, 10k train / 2k test, 20 epochs,
+  batch size `128`, `lr=1e-3`, full ablation, `alpha_min=1e-3`,
+  `alpha_max=1.5e-3`, `rho_star=0.80`, `rho_beta=0.90`, `kp=0.02`, factor
+  clip `[0.98, 1.015]`.
+- Output directories:
+  `controlled_adam_project/outputs/cifar10_resnet_10k_2k_20epoch_balanced/`,
+  `controlled_adam_project/outputs/cifar10_resnet_10k_2k_20epoch_balanced_seed_456/`,
+  and
+  `controlled_adam_project/outputs/cifar10_resnet_10k_2k_20epoch_balanced_seed_789/`.
+- Per-seed final / best test accuracy:
+
+```text
+seed 123:
+vanilla_adam          final 0.6915  best 0.6915
+fixed_adam_direction final 0.6875  best 0.6975
+controlled_raw_rho   final 0.7395  best 0.7395
+controlled_ema       final 0.7135  best 0.7135
+controlled_ema_trust final 0.7135  best 0.7135
+
+seed 456:
+vanilla_adam          final 0.6730  best 0.7065
+fixed_adam_direction final 0.6830  best 0.7270
+controlled_raw_rho   final 0.6950  best 0.7205
+controlled_ema       final 0.6925  best 0.7245
+controlled_ema_trust final 0.6925  best 0.7245
+
+seed 789:
+vanilla_adam          final 0.7015  best 0.7015
+fixed_adam_direction final 0.7110  best 0.7110
+controlled_raw_rho   final 0.7105  best 0.7105
+controlled_ema       final 0.7190  best 0.7190
+controlled_ema_trust final 0.7190  best 0.7190
+```
+
+- Three-seed aggregate:
+
+```text
+vanilla_adam          final 0.6887 +/- 0.0145  best 0.6998 +/- 0.0076
+fixed_adam_direction final 0.6938 +/- 0.0150  best 0.7118 +/- 0.0148
+controlled_raw_rho   final 0.7150 +/- 0.0226  best 0.7235 +/- 0.0147
+controlled_ema       final 0.7083 +/- 0.0140  best 0.7190 +/- 0.0055
+controlled_ema_trust final 0.7083 +/- 0.0140  best 0.7190 +/- 0.0055
+```
+
+Interpretation:
+
+- The controlled variants retain a mean final-accuracy advantage over vanilla
+  Adam and fixed Adam-direction on this three-seed ResNet subset benchmark.
+- Raw-rho has the best mean final and best accuracy, but also the largest
+  final-accuracy standard deviation because seed `123` was much stronger than
+  seeds `456` and `789`.
+- EMA and EMA-trust are more stable across seeds but slightly behind raw-rho on
+  the mean.
+- EMA-trust again matches EMA exactly, so the trust expansion path remains
+  inactive under these capped Adam-scale settings. We later checked the
+  minibatch step diagnostics directly: `controlled_ema_trust` had `0/1580`
+  trust expansions for each of seeds `123`, `456`, and `789`.
+- The inactivity was not a mystery in the optimizer logic. The balanced ResNet
+  config used `alpha_min=1e-3` and `alpha_max=1.5e-3`, while the trust-region
+  trigger still used `trust_region_alpha_threshold=1e-4`. Since the active alpha
+  floor was already ten times larger than the trust threshold, the condition
+  `alpha_used <= trust_region_alpha_threshold` could not be satisfied in normal
+  accepted steps. In this benchmark, `controlled_ema_trust` should therefore be
+  interpreted as an EMA-rho run with the trust hook enabled but dormant.
+- A proper Adam-scale trust-region follow-up should keep the anti-collapse floor
+  but move the trust threshold near it, for example
+  `trust_region_alpha_threshold=1e-3` or `1.05e-3`, and use a gentle
+  `trust_region_expand_factor` such as `1.1` or `1.2`.
+- All fixed/controlled variants accepted essentially every step. This remains
+  an alpha-governor regime rather than a rejection-heavy line search.
+
 ## 4. Fashion-MNIST Adam Experiments
 
 Validated local Fashion-MNIST files under:
@@ -596,15 +918,19 @@ controlled_muon_project/src/controlled_muon/torch_optimizers.py
 
 Tensor handling:
 
-- 1D tensors reshape to `(-1, 1)`
-- 2D tensors are orthogonalized directly
-- convolution kernels and higher-rank tensors reshape to `(out_channels, -1)`
-- orthogonalized updates reshape back to original tensor shape
+- neural-network Muon paths now follow `torch.optim.Muon` scope
+- 2D hidden matrix parameters are orthogonalized directly
+- vectors, scalars, norms, biases, embeddings, heads, and convolution kernels
+  use AdamW-style fallback updates
+- Muon momentum uses the PyTorch `lerp` convention, with the quintic
+  Newton-Schulz coefficients `(3.4445, -4.7750, 2.0315)` and 5 default steps
 
 Important caveat:
 
 - The current implementation uses NumPy/CPU orthogonalization.
 - It is useful for research demos but slow for CIFAR.
+- Historical Muon benchmark tables before the official-style grouping fix used
+  a broader local Muon variant and should be treated as archival.
 
 Verification:
 
@@ -781,7 +1107,278 @@ Document roles:
 - `DEVELOPMENT_LOG.md`: engineering chronology and benchmark timeline.
 - `PROJECT_HANDOFF.md`: current state, commands, caveats, and next steps for another agent.
 
-## 11. Recommended Next Engineering Steps
+## 11. Deterministic Function Optimization Manager Suite
+
+Added a self-contained function optimization benchmark/report runner:
+
+```text
+controlled_adam_project/examples/run_function_benchmark_report.py
+```
+
+Added the tracked guide:
+
+```text
+FUNCTION_OPTIMIZATION_BENCHMARK_SUITE.md
+```
+
+Purpose:
+
+- provide a simple, deterministic, non-deep-learning benchmark suite for
+  manager updates;
+- compare optimizer behavior on the existing 2D functions;
+- generate plots that show trajectories on objective landscapes, objective
+  residual curves, and global alpha schedules;
+- keep the suite reproducible from code because generated outputs are ignored
+  by git.
+
+Command run:
+
+```bash
+cd controlled_adam_project
+MPLCONFIGDIR=/private/tmp PYTHONPATH=src python examples/run_function_benchmark_report.py \
+  --output-dir outputs/function_report_multistart
+```
+
+Generated local outputs:
+
+```text
+controlled_adam_project/outputs/function_report_multistart/FUNCTION_OPTIMIZATION_BENCHMARK_REPORT.md
+controlled_adam_project/outputs/function_report_multistart/per_start_results.csv
+controlled_adam_project/outputs/function_report_multistart/aggregate_results.csv
+controlled_adam_project/outputs/function_report_multistart/benchmark_config.csv
+controlled_adam_project/outputs/function_report_multistart/*_trajectory_comparison.png
+controlled_adam_project/outputs/function_report_multistart/*_objective_curves.png
+controlled_adam_project/outputs/function_report_multistart/*_alpha_curves.png
+```
+
+Benchmark design:
+
+- objectives: Quadratic, Rosenbrock, Himmelblau, Rastrigin, Beale, Ackley,
+  Six-hump camel, Goldstein-Price, and Easom;
+- starts: five fixed starts per objective;
+- optimizers: vanilla Adam, controlled Adam with raw rho, controlled Adam with
+  EMA-smoothed rho, and controlled Adam with EMA-smoothed rho plus the
+  trust-region tiny-alpha expansion hook;
+- success: residual above known global minimum or distance to known global
+  minimizer;
+- residual is used instead of raw objective value because some objectives have
+  negative global minima.
+
+Current result snapshot:
+
+```text
+Highest success-rate winner counts:
+vanilla Adam          5
+controlled raw-rho   9
+controlled EMA-rho   7
+controlled EMA+trust  7
+
+Lowest median final residual winner counts:
+vanilla Adam          5
+controlled raw-rho   3
+controlled EMA-rho   4
+controlled EMA+trust  3
+
+Lowest median best residual winner counts:
+vanilla Adam          5
+controlled raw-rho   3
+controlled EMA-rho   4
+controlled EMA+trust  3
+```
+
+Ties are counted for every tied optimizer, so row totals can exceed nine.
+
+Interpretation:
+
+- controlled raw-rho ties or wins success rate on every objective in this
+  suite;
+- controlled variants improve success rate over vanilla Adam on Quadratic,
+  Rosenbrock, Himmelblau, and Beale;
+- controlled variants improve median best residual over vanilla Adam on
+  Quadratic, Rosenbrock, Beale, and Goldstein-Price;
+- the trust-region Adam variant is included for consistency with neural-network
+  benchmarks, but on these deterministic 2D functions it usually overlaps
+  EMA-rho because the high-rho/tiny-alpha expansion condition rarely triggers;
+- vanilla Adam still ties or wins some residual metrics when the fixed learning
+  rate is well matched;
+- Rastrigin, Ackley, and Six-hump camel are useful limitation cases because
+  local step-size control does not solve global basin selection.
+
+Trimmed manager report:
+
+```bash
+cd controlled_adam_project
+MPLCONFIGDIR=/private/tmp PYTHONPATH=src python examples/run_function_benchmark_report.py \
+  --output-dir outputs/function_report_manager_trimmed \
+  --objectives quadratic beale goldstein_price
+```
+
+This three-objective report keeps Quadratic, Beale, and Goldstein-Price. It is
+intended for a shorter manager update where the goal is to show controlled Adam
+clearly without displaying every limitation case in the first figure. Winner
+counts in the current trimmed run are:
+
+```text
+Highest success-rate winner counts:
+vanilla Adam          1
+controlled raw-rho   3
+controlled EMA-rho   2
+controlled EMA+trust  2
+
+Lowest median final residual winner counts:
+vanilla Adam          0
+controlled raw-rho   1
+controlled EMA-rho   2
+controlled EMA+trust  2
+
+Lowest median best residual winner counts:
+vanilla Adam          0
+controlled raw-rho   1
+controlled EMA-rho   2
+controlled EMA+trust  2
+```
+
+The trimmed report's `median_trust_expansions` values are `0.0`, so EMA+trust
+should be described as included for completeness rather than as a separately
+activated trust-region effect in this specific manager slice.
+
+Verification:
+
+```bash
+python -m py_compile controlled_adam_project/examples/run_function_benchmark_report.py
+```
+
+Muon extension:
+
+- Added `controlled_muon_project/examples/run_function_benchmark_report.py`.
+- The Muon function report compares `vanilla_muon`, `controlled_raw_rho`,
+  `controlled_ema`, and `controlled_ema_trust` on the same nine 2D functions
+  and five starts per function.
+- For 2D vector functions, the runner uses a vector analogue of Muon by treating
+  the momentum vector as a column matrix and passing it through the same
+  orthogonalization utility used by the Muon subproject.
+- Removed the earlier `fixed_muon_direction` diagnostic from the function
+  report because it duplicated `vanilla_muon` in this local 2D runner: both used
+  a fixed alpha and no rho controller.
+- Generated local report:
+  `controlled_muon_project/outputs/function_report_multistart/FUNCTION_OPTIMIZATION_MUON_BENCHMARK_REPORT.md`.
+- Generated trimmed manager report:
+  `controlled_muon_project/outputs/function_report_manager_trimmed/FUNCTION_OPTIMIZATION_MUON_BENCHMARK_REPORT_ZH.md`.
+- Both Adam and Muon function reports now generate Chinese companion reports
+  and standalone `*_surface_3d.png` objective-landscape plots with formulas
+  printed inside the figures.
+
+Muon current result snapshot:
+
+```text
+Highest success-rate winner counts:
+vanilla Muon           9
+controlled raw-rho    7
+controlled EMA-rho    7
+controlled EMA+trust  7
+
+Lowest median final residual winner counts:
+vanilla Muon           4
+controlled raw-rho    3
+controlled EMA-rho    3
+controlled EMA+trust  4
+
+Lowest median best residual winner counts:
+vanilla Muon           6
+controlled raw-rho    3
+controlled EMA-rho    1
+controlled EMA+trust  2
+```
+
+Muon interpretation:
+
+- The 2D Muon story differs from Adam: vanilla Muon is very competitive on this
+  normalized vector-direction suite.
+- Controlled Muon improves some cases, especially Quadratic residuals, but it
+  does not dominate overall.
+- Present this as an honest diagnostic: alpha control is not automatically
+  better for every base direction.
+- Because this is a vector analogue, it should not be overclaimed as a full
+  matrix Muon benchmark.
+
+Muon verification:
+
+```bash
+python -m py_compile controlled_muon_project/examples/run_function_benchmark_report.py
+cd controlled_muon_project && PYTHONPATH=src pytest -q
+```
+
+Result:
+
+```text
+6 passed
+```
+
+## 12. Function Manager Report Follow-Ups
+
+Added reproducibility controls to the Adam and Muon deterministic function
+report runners:
+
+```text
+--step-multiplier
+--random-starts-per-objective
+--random-seed
+```
+
+Generated longer manager-facing function reports:
+
+```text
+controlled_adam_project/outputs/function_report_manager_trimmed_10x
+controlled_adam_project/outputs/function_report_manager_extended_10x
+controlled_adam_project/outputs/function_report_manager_extended_10x_15starts
+controlled_adam_project/outputs/function_report_manager_extended_10x_30starts
+controlled_adam_project/outputs/function_report_manager_extended_10x_60starts
+controlled_adam_project/outputs/function_report_manager_extended_60starts_default_steps
+controlled_muon_project/outputs/function_report_manager_trimmed_10x
+controlled_muon_project/outputs/function_report_manager_extended_10x
+```
+
+Main interpretation:
+
+- Longer Adam runs show that vanilla Adam can catch up on some objectives with
+  enough iterations, so the best controlled-Adam claim is faster local progress
+  and better step-size robustness, not universal final dominance.
+- The 60-start default-step run is the strongest current manager-facing
+  function result for a fixed practical iteration budget. Controlled variants
+  improve success rate over vanilla Adam on Beale, Goldstein-Price,
+  Rosenbrock, Himmelblau, and Quadratic within the default step counts.
+- In that 60-start default run, Beale success is `33-37%` for controlled
+  variants versus `5%` for vanilla; Rosenbrock is `28-32%` versus `8%`;
+  Himmelblau is `97%` versus `92%`; and vanilla Adam gets `0%` success on the
+  ill-conditioned Quadratic within 300 steps.
+- Himmelblau is a clean controlled-Adam manager example: all optimizers
+  succeed, but controlled Adam reaches the success criterion much faster.
+- Rosenbrock shows a speed-versus-eventual-success tradeoff.
+- The 60-start 10x run is the corresponding caveat. Vanilla Adam catches up or
+  exceeds success on several functions with enough time, but controlled
+  variants still tend to reach successful runs faster. On Rosenbrock, vanilla
+  reaches `100%` success but takes about `8085` median successful iterations,
+  while controlled variants take about `3954-5060`.
+- Beale and Goldstein-Price are budget-sensitive: controlled variants are much
+  better under the default budget, but vanilla catches up more under 10x.
+- Muon 10x reports did not materially improve the Muon story; vanilla Muon
+  remains very competitive in the 2D vector analogue.
+
+Added a focused Rastrigin basin benchmark:
+
+```text
+controlled_adam_project/examples/run_rastrigin_basin_benchmark.py
+controlled_adam_project/outputs/rastrigin_basin_benchmark_30starts
+```
+
+This benchmark samples 30 starts per radius from boxes centered on `(0, 0)` and
+plots success rate versus initialization radius. Result: all optimizers solve
+Rastrigin reliably when initialized inside radius `0.5`, success drops sharply
+outside that basin, and none reach the true global minimum at radius `4.0`.
+Controlled Adam reaches successful runs faster than vanilla Adam inside the
+correct basin, but it does not solve global basin selection.
+
+## 13. Recommended Next Engineering Steps
 
 1. Add per-epoch progress logging to the Muon image benchmark runner. Adam now has `--print-every` and `--checkpoint-every`.
 

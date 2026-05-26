@@ -45,11 +45,63 @@ The main runner supports:
 
 The same runner supports the same style of controlled variants as the Adam project.
 
+For neural-network benchmarks, the PyTorch Muon path follows
+`torch.optim.Muon`'s scope: Muon is used only for 2D hidden matrix weights.
+Non-2D parameters, convolution kernels, biases, batch/norm parameters,
+embeddings, and heads use AdamW-style fallback updates. Nonzero
+`--weight-decay` is decoupled in the AdamW/Muon sense. The Muon direction uses
+PyTorch's `lerp` momentum convention, quintic Newton-Schulz coefficients
+`(3.4445, -4.7750, 2.0315)`, 5 default Newton-Schulz steps, and original
+rectangular shape scaling.
+
 ## Run the function demo
 
 ```bash
 python examples/run_matrix_quadratic_demo.py
 ```
+
+For a self-contained deterministic 2D function optimization report, run:
+
+```bash
+MPLCONFIGDIR=/private/tmp PYTHONPATH=src python examples/run_function_benchmark_report.py \
+  --output-dir outputs/function_report_multistart
+```
+
+This report compares `vanilla_muon`, `controlled_raw_rho`, `controlled_ema`,
+and `controlled_ema_trust` on the same nine 2D functions used by the Adam
+report. It writes:
+
+```text
+outputs/function_report_multistart/FUNCTION_OPTIMIZATION_MUON_BENCHMARK_REPORT.md
+outputs/function_report_multistart/FUNCTION_OPTIMIZATION_MUON_BENCHMARK_REPORT_ZH.md
+outputs/function_report_multistart/per_start_results.csv
+outputs/function_report_multistart/aggregate_results.csv
+outputs/function_report_multistart/benchmark_config.csv
+outputs/function_report_multistart/*_surface_3d.png
+outputs/function_report_multistart/*_trajectory_comparison.png
+outputs/function_report_multistart/*_objective_curves.png
+outputs/function_report_multistart/*_alpha_curves.png
+```
+
+For the shorter manager-facing report:
+
+```bash
+MPLCONFIGDIR=/private/tmp PYTHONPATH=src python examples/run_function_benchmark_report.py \
+  --output-dir outputs/function_report_manager_trimmed \
+  --objectives quadratic beale goldstein_price
+```
+
+The trimmed report writes Chinese and English Markdown files in
+`outputs/function_report_manager_trimmed/`. The older function-report-only
+`fixed_muon_direction` diagnostic was removed because it duplicated
+`vanilla_muon` in the local 2D runner: both used fixed alpha and no rho
+controller.
+
+For 2D vector functions, the report uses a vector analogue of Muon: the
+momentum vector is treated as a column matrix and passed through the same
+orthogonalization utility used elsewhere in this subproject. The top-level
+`FUNCTION_OPTIMIZATION_BENCHMARK_SUITE.md` explains how to interpret the Adam
+and Muon reports together.
 
 ## Run the image benchmark
 
@@ -94,6 +146,11 @@ MPLCONFIGDIR=/private/tmp PYTHONPATH=src python examples/run_mnist_demo.py \
 ```
 
 ## Recent benchmark results
+
+The historical tables below predate the official-style Muon parameter-scope
+cleanup and should be treated as archival. For current PI-vs-vanilla
+Fashion-MNIST comparisons, use the `outputs/pi_official_muon_*` folders in the
+parent workspace.
 
 Fashion-MNIST, 20 epochs, 4096 train / 1024 test:
 

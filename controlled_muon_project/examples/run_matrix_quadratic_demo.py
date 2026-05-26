@@ -39,7 +39,7 @@ def run_one_objective(
     alpha_max: float,
     output_dir: Path,
 ) -> None:
-    config = MuonConfig(momentum=0.90, nesterov=True, orthogonalizer="newton_schulz", ns_steps=8, update_scale=1.0)
+    config = MuonConfig(momentum=0.90, nesterov=True, orthogonalizer="newton_schulz", update_scale=1.0)
     vanilla = vanilla_muon(objective=objective, W0=x0, eta=vanilla_alpha, steps=steps, config=config)
     controlled = controlled_muon(
         objective=objective,
@@ -52,7 +52,6 @@ def run_one_objective(
         rho_min=0.0,
         alpha_min=1e-8,
         alpha_max=alpha_max,
-        reject_bad_steps=True,
     )
 
     paths = [

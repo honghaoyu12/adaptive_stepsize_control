@@ -1,6 +1,6 @@
 # Project Handoff: Adaptive Step-Size Control
 
-Last updated: 2026-05-22
+Last updated: 2026-05-24
 
 This document is for a future coding agent taking over the workspace. It is intentionally comprehensive and operational: it explains what the project is, what has been implemented, how to run it, what benchmark results are already known, and what caveats matter.
 
@@ -8,6 +8,8 @@ Related project-memory documents:
 
 - `CONVERSATION_LOG.md`: nuanced discussion history and interpretation.
 - `DEVELOPMENT_LOG.md`: chronological engineering and benchmark timeline.
+- `FUNCTION_OPTIMIZATION_BENCHMARK_SUITE.md`: self-contained deterministic 2D
+  function benchmark suite and manager-report guide.
 - `OPTIMIZER_VARIANTS_BENCHMARK_REPORT.md`: comprehensive five-variant optimizer comparison and benchmark interpretation.
 - `PROJECT_HANDOFF.md`: current-state operating manual.
 
@@ -71,6 +73,20 @@ adaptive_stepsize_control/
 All projects use a `src/` layout. Either install editable with `pip install -e .`, or run with `PYTHONPATH=src`.
 
 Generated outputs and local datasets are intentionally ignored by git.
+
+Output cleanup note: existing experiment results were moved out of the active
+top-level output locations on 2026-05-26. The current active output directories
+contain only `.gitkeep` and the backup folder:
+
+```text
+outputs/backup_20260526_182414/
+controlled_adam_project/outputs/backup_20260526_182414/
+controlled_muon_project/outputs/backup_20260526_182414/
+```
+
+New experiments should write directly under `outputs/`,
+`controlled_adam_project/outputs/`, or `controlled_muon_project/outputs/` with
+fresh descriptive folder names. Treat the backup folders as archival.
 
 ## Current Git State
 
@@ -171,12 +187,78 @@ Interpretation:
     `rho_beta=0.90`, `kp=0.03`, factor clip `[0.98, 1.02]`.
   - Candidate C: `alpha_min=9.5e-4`, `alpha_max=1.25e-3`, `rho_star=0.75`,
     `rho_beta=0.90`, `kp=0.01`, factor clip `[0.995, 1.005]`.
-- Candidate A is the recommended next run because it directly tests whether
-  preventing alpha from drifting below Adam scale fixes the Fashion-MNIST CNN
-  underperformance.
+- Candidate A was run on three Fashion-MNIST CNN seeds. It improved controlled
+  variants by keeping alpha near `8.9e-4`, but still did not clearly beat fixed
+  Adam-direction: three-seed final accuracies were vanilla `0.8946`, fixed
+  `0.8960`, raw-rho `0.8944`, EMA `0.8945`, and EMA-trust `0.8943`.
 
-- CIFAR ResNet should still be staged carefully with a smoke run before any
-  large ablation.
+- Candidate C was then run on the same three Fashion-MNIST CNN seeds. It kept
+  alpha close to `9.3e-4` and lifted raw-rho slightly above the Candidate A
+  controlled results, but still did not beat fixed Adam-direction on mean
+  final accuracy: vanilla `0.8946`, fixed `0.8960`, raw-rho `0.8951`, EMA
+  `0.8937`, and EMA-trust `0.8937`.
+
+- Candidate B was then run with a faster-recovery setting. It underperformed
+  both Candidate A and Candidate C: mean final accuracies were vanilla
+  `0.8946`, fixed `0.8960`, raw-rho `0.8921`, EMA `0.8930`, and EMA-trust
+  `0.8930`. That suggests the more aggressive controller is too jumpy for this
+  Fashion-MNIST CNN setup.
+
+- Added `--model resnet_cifar`, implemented as `SmallCIFARResNet` with
+  `175258` trainable parameters.
+- Ran the staged CIFAR-10 ResNet smoke test: 5k/1k, 3 epochs, seed `123`,
+  full ablation, balanced controller (`alpha_min=1e-3`, `alpha_max=1.5e-3`,
+  `rho_star=0.80`, `rho_beta=0.90`, `kp=0.02`, factor clip `[0.98, 1.015]`).
+- Output directory:
+  `controlled_adam_project/outputs/cifar10_resnet_smoke_5k_1k_3epoch_balanced/`.
+- Final test accuracy: vanilla `0.3610`, fixed `0.3730`, raw-rho `0.4100`,
+  EMA `0.3800`, EMA-trust `0.3800`.
+- The smoke run completed cleanly: all controlled variants accepted every step
+  and alpha stayed near `1e-3`.
+- Then ran the staged 20-epoch CIFAR-10 ResNet benchmark on 10k train / 2k
+  test with the same balanced settings, retaining per-epoch progress prints and
+  checkpoints.
+- Output directory:
+  `controlled_adam_project/outputs/cifar10_resnet_10k_2k_20epoch_balanced/`.
+- Final / best test accuracy: vanilla Adam `0.6915 / 0.6915`, fixed
+  Adam-direction `0.6875 / 0.6975`, raw-rho `0.7395 / 0.7395`, EMA
+  `0.7135 / 0.7135`, EMA-trust `0.7135 / 0.7135`.
+- Diagnostics: all fixed/controlled variants accepted every step. Raw-rho,
+  EMA, and EMA-trust reached `alpha_max=1.5e-3`; final mean rho was about
+  `0.88`. EMA and EMA-trust were identical, so trust-region expansion did not
+  materially alter this run.
+- Later diagnostic check: for the three balanced CIFAR ResNet seeds
+  `123/456/789`, `controlled_ema_trust` recorded `0/1580` trust expansions in
+  every run. This happened because the run used `alpha_min=1e-3` but
+  `trust_region_alpha_threshold=1e-4`; the trust trigger was below the allowed
+  alpha floor, so the branch could not activate. Treat these EMA-trust numbers
+  as EMA-rho results with a dormant trust hook, not as evidence that the trust
+  expansion rule was tested.
+- To test trust-region expansion properly in this Adam-scale CIFAR regime, set
+  `trust_region_alpha_threshold` near the alpha floor, such as `1e-3` or
+  `1.05e-3`, and use a gentle `trust_region_expand_factor` such as `1.1` or
+  `1.2`.
+- Follow-up Candidate 1 higher-cap test (`alpha_max=1.75e-3`,
+  `rho_star=0.82`, `kp=0.015`) was worse: raw-rho final/best `0.7120`,
+  EMA/EMA-trust final `0.6695`, best `0.6915`.
+- Follow-up stronger fixed-LR control (`lr=1.5e-3`, `alpha_max=1.5e-3`) made
+  vanilla Adam stronger (`0.7065`) and EMA/EMA-trust reached `0.7250`, but
+  fixed Adam-direction best was only `0.7040` and raw-rho final/best was
+  `0.6985`. This suggests the original raw-rho `0.7395` result was not merely
+  caused by using a larger fixed Adam learning rate; ramping from `1e-3` to
+  the cap seems important.
+- Multi-seed validation of the original balanced setting was then run for
+  seeds `123`, `456`, and `789`. Three-seed final accuracy means were:
+  vanilla `0.6887`, fixed `0.6938`, raw-rho `0.7150`, EMA `0.7083`, and
+  EMA-trust `0.7083`. Best accuracy means were: vanilla `0.6998`, fixed
+  `0.7118`, raw-rho `0.7235`, EMA `0.7190`, and EMA-trust `0.7190`.
+- Interpretation: controlled variants still show a modest mean advantage on
+  the ResNet subset benchmark, but the seed `123` raw-rho result was unusually
+  strong. Treat this as encouraging evidence, not a settled claim.
+- Next staged ResNet step: either run a reduced-variant 5-seed benchmark
+  (`vanilla_adam`, `fixed_adam_direction`, `controlled_raw_rho`,
+  `controlled_ema`) or move to a larger train/test subset for the same balanced
+  setting.
 
 There are also two user-provided/untracked comparison files at repo root:
 
@@ -240,6 +322,7 @@ Important files:
 - `controlled_adam_project/src/controlled_adam/torch_optimizers.py`
 - `controlled_adam_project/src/controlled_adam/plotting.py`
 - `controlled_adam_project/examples/run_demo.py`
+- `controlled_adam_project/examples/run_function_benchmark_report.py`
 - `controlled_adam_project/examples/run_mnist_demo.py`
 - `controlled_adam_project/tests/test_optimizers.py`
 - `controlled_adam_project/tests/test_torch_optimizers.py`
@@ -288,6 +371,11 @@ Trust-region recovery rule:
 
 This was added because alpha sometimes collapsed to very small values while rho became high, which means the local model was too conservative rather than the optimizer being done.
 
+The "alpha is tiny" threshold must be chosen relative to the configured alpha
+floor. If `trust_region_alpha_threshold < alpha_min`, then the trust branch is
+effectively unreachable. This exact mismatch occurred in the balanced CIFAR
+ResNet Adam runs: `alpha_min=1e-3` and `trust_region_alpha_threshold=1e-4`.
+
 ### Adam Objectives
 
 The 2D deterministic benchmark suite includes:
@@ -317,6 +405,100 @@ Run function benchmarks:
 cd controlled_adam_project
 MPLCONFIGDIR=/private/tmp PYTHONPATH=src python examples/run_demo.py
 ```
+
+Run the self-contained deterministic function benchmark report:
+
+```bash
+cd controlled_adam_project
+MPLCONFIGDIR=/private/tmp PYTHONPATH=src python examples/run_function_benchmark_report.py \
+  --output-dir outputs/function_report_multistart
+```
+
+This report runner compares vanilla Adam, controlled raw-rho Adam, controlled
+EMA-rho Adam, and controlled EMA+trust Adam on nine 2D objectives with five
+fixed starts each. It writes CSVs, trajectory plots over landscapes, residual
+curves, alpha curves, and a standalone Markdown report at
+`controlled_adam_project/outputs/function_report_multistart/FUNCTION_OPTIMIZATION_BENCHMARK_REPORT.md`.
+The tracked top-level guide is `FUNCTION_OPTIMIZATION_BENCHMARK_SUITE.md`.
+
+For the trimmed manager version:
+
+```bash
+cd controlled_adam_project
+MPLCONFIGDIR=/private/tmp PYTHONPATH=src python examples/run_function_benchmark_report.py \
+  --output-dir outputs/function_report_manager_trimmed \
+  --objectives quadratic beale goldstein_price
+```
+
+The trimmed Adam report currently shows controlled variants beating vanilla on
+the chosen residual comparisons, but `controlled_ema_trust` mostly overlaps
+`controlled_ema_rho` because the tiny-alpha trust expansion hook does not fire
+on those three selected functions.
+
+Recent function-report follow-ups:
+
+- Added `--step-multiplier`, `--random-starts-per-objective`, and
+  `--random-seed` to both Adam and Muon function report runners.
+- Generated 10x three-function reports:
+  - `controlled_adam_project/outputs/function_report_manager_trimmed_10x/`
+  - `controlled_muon_project/outputs/function_report_manager_trimmed_10x/`
+- Generated six-function 10x reports including Rosenbrock, Himmelblau, and
+  Rastrigin:
+  - `controlled_adam_project/outputs/function_report_manager_extended_10x/`
+  - `controlled_muon_project/outputs/function_report_manager_extended_10x/`
+- Generated a broader 15-start Adam aggregate:
+  `controlled_adam_project/outputs/function_report_manager_extended_10x_15starts/`.
+- Generated larger Adam aggregates:
+  - `controlled_adam_project/outputs/function_report_manager_extended_10x_30starts/`
+  - `controlled_adam_project/outputs/function_report_manager_extended_10x_60starts/`
+  - `controlled_adam_project/outputs/function_report_manager_extended_60starts_default_steps/`
+
+Interpretation for manager-facing function optimization:
+
+- Controlled Adam is strongest as an early/local progress and step-size
+  robustness story, not as a guarantee of best eventual residual after very
+  long runs.
+- The 60-start default-step run is the best manager-facing evidence for fixed
+  practical budgets. Within the default steps, controlled variants outperform
+  vanilla success rate on Beale, Goldstein-Price, Rosenbrock, Himmelblau, and
+  Quadratic.
+- Himmelblau is the cleanest extra example: all optimizers succeed, but
+  controlled Adam reaches the success criterion much faster. In the 60-start
+  default run, controlled variants reach success around `84-88` iterations,
+  while vanilla takes about `291`.
+- Rosenbrock shows controlled Adam can succeed faster while vanilla Adam can
+  eventually catch up or exceed success with enough iterations. In the 60-start
+  default run, controlled success is `28-32%` versus vanilla `8%`; in the
+  60-start 10x run, vanilla reaches `100%` but takes about `8085` median
+  successful iterations versus controlled variants around `3954-5060`.
+- Beale and Goldstein-Price become more nuanced under 60-start aggregation:
+  controlled variants are clearly better under the default budget, but vanilla
+  catches up more under the 10x budget.
+- Rastrigin is a limitation case: local step-size control does not solve global
+  basin selection.
+
+Focused Rastrigin basin benchmark:
+
+```bash
+cd controlled_adam_project
+MPLCONFIGDIR=/private/tmp PYTHONPATH=src:examples python examples/run_rastrigin_basin_benchmark.py \
+  --output-dir outputs/rastrigin_basin_benchmark_30starts \
+  --starts-per-radius 30 \
+  --steps 12000
+```
+
+This benchmark samples starts from boxes around `(0, 0)` and writes:
+
+```text
+controlled_adam_project/outputs/rastrigin_basin_benchmark_30starts/RASTRIGIN_BASIN_BENCHMARK_REPORT_ZH.md
+controlled_adam_project/outputs/rastrigin_basin_benchmark_30starts/aggregate_results.csv
+controlled_adam_project/outputs/rastrigin_basin_benchmark_30starts/rastrigin_success_rate_by_radius.png
+```
+
+Main result: all methods succeed reliably up to radius `0.5`; success falls to
+about `57%` at radius `0.75`, `23%` at radius `1.0`, and `0%` at radius `4.0`.
+Controlled Adam usually reaches success faster inside the correct basin, but it
+does not expand the global basin enough to solve far-away Rastrigin starts.
 
 Run Fashion-MNIST ablation using local IDX files:
 
@@ -553,25 +735,31 @@ There are two Muon implementations:
 Muon direction:
 
 ```text
-M_t = momentum * M_{t-1} + G_t
-B_t = momentum * M_t + G_t     # if Nesterov
-O_t = orthogonalize(B_t)
-P_t = -update_scale * O_t
+B_t = lerp(B_{t-1}, G_t, 1 - momentum)
+U_t = lerp(G_t, B_t, momentum)     # if Nesterov
+O_t = NewtonSchulz_quintic(U_t)
+P_t = -shape_scale * update_scale * O_t
 ```
 
 Orthogonalization methods:
 
 - exact SVD polar factor
-- Newton-Schulz polar iteration
+- Muon-style quintic Newton-Schulz iteration with PyTorch's default
+  coefficients `(3.4445, -4.7750, 2.0315)` and 5 default steps
 
 PyTorch tensor handling:
 
-- 1D parameters are reshaped to `(-1, 1)`
-- 2D parameters are kept 2D
-- conv kernels and higher-rank tensors are flattened to `(out_channels, -1)`
-- orthogonalized matrices are reshaped back to original tensor shape
+- the neural-network Muon path follows `torch.optim.Muon` scope
+- only 2D hidden matrix parameters use Muon by default
+- vectors, scalars, norms, biases, embeddings, heads, and convolution kernels
+  use AdamW-style fallback updates
+- nonzero weight decay is decoupled, as in AdamW/Muon
 
-This is educational and CPU-heavy, not a production Muon implementation. The CIFAR runs are slower than Adam because each controlled variant performs orthogonalization and same-minibatch trial loss evaluations.
+This is educational and CPU-heavy, not a production Muon implementation. The
+CIFAR runs are slower than Adam because each controlled variant performs
+orthogonalization and same-minibatch trial loss evaluations. The deterministic
+2D function runner still uses a vector analogue of Muon and should not be read
+as a full neural-network `torch.optim.Muon` replacement.
 
 ### Muon Optimizer Variants
 
@@ -624,6 +812,29 @@ Run function/objective demo:
 cd controlled_muon_project
 MPLCONFIGDIR=/private/tmp PYTHONPATH=src python examples/run_matrix_quadratic_demo.py
 ```
+
+Run deterministic 2D function benchmark report:
+
+```bash
+cd controlled_muon_project
+MPLCONFIGDIR=/private/tmp PYTHONPATH=src python examples/run_function_benchmark_report.py \
+  --output-dir outputs/function_report_multistart
+```
+
+This report compares `vanilla_muon`, `controlled_raw_rho`, `controlled_ema`,
+and `controlled_ema_trust` on the same nine 2D objectives used by the Adam
+report. It writes
+`controlled_muon_project/outputs/function_report_multistart/FUNCTION_OPTIMIZATION_MUON_BENCHMARK_REPORT.md`.
+The shorter manager-facing version is
+`controlled_muon_project/outputs/function_report_manager_trimmed/FUNCTION_OPTIMIZATION_MUON_BENCHMARK_REPORT_ZH.md`.
+Both Muon function reports include Chinese companion reports and standalone
+`*_surface_3d.png` plots with the objective formula printed inside each figure.
+The earlier `fixed_muon_direction` diagnostic was removed from the function
+report because it duplicated `vanilla_muon` in this local 2D vector runner:
+both used fixed alpha and no rho controller.
+For these 2D vector objectives, Muon is implemented as a vector analogue by
+treating the momentum vector as a column matrix before orthogonalization. Do
+not overclaim it as a full matrix Muon benchmark.
 
 Run Fashion-MNIST Muon ablation:
 

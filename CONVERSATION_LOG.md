@@ -1,11 +1,15 @@
 # Conversation Log
 
-Last updated: 2026-05-22
+Last updated: 2026-05-24
 
 Current handoff note: see `PROJECT_HANDOFF.md` first. For a concise
 chronological engineering timeline, see `DEVELOPMENT_LOG.md`. This file remains
 important as the nuanced conversation memory: discussion, interpretation,
 questions, and why decisions evolved.
+
+For manager-facing deterministic function optimization results, see
+`FUNCTION_OPTIMIZATION_BENCHMARK_SUITE.md` and regenerate the local report with
+`controlled_adam_project/examples/run_function_benchmark_report.py`.
 
 This log summarizes the current state of the whole `adaptive_stepsize_control`
 workspace so future sessions can resume without rediscovering the project.
@@ -25,6 +29,8 @@ The workspace contains three related Python projects:
    - Adam supplies the preconditioned direction.
    - The outer controller chooses the scalar global multiplier `alpha` using an
      actual-over-predicted decrease ratio.
+   - Now includes a self-contained deterministic function benchmark report
+     runner for manager updates.
 
 3. Subproject: `controlled_muon_project`
    - Muon version of the controlled Adam project.
@@ -71,8 +77,124 @@ Recent Adam CIFAR-10 tuning context:
 - We discussed better Fashion-MNIST CNN parameters. The current setting appears
   too conservative because controlled variants ended near `alpha ~= 6.8e-4`,
   below the Adam-scale `1e-3` baseline. The recommended next candidate is
+
+- Candidate A was run on three Fashion-MNIST CNN seeds. It improved controlled
+  variants by keeping alpha near `8.9e-4`, but still did not clearly beat fixed
+  Adam-direction: three-seed final accuracies were vanilla `0.8946`, fixed
+  `0.8960`, raw-rho `0.8944`, EMA `0.8945`, and EMA-trust `0.8943`.
   `alpha_min=9e-4`, `alpha_max=1.5e-3`, `rho_star=0.75`, `rho_beta=0.90`,
   `kp=0.02`, with factor clip `[0.98, 1.015]`.
+
+Recent deterministic function optimization report:
+
+- The user wanted a short but detailed non-deep-learning report for a manager
+  update focused on how the controlled optimizers behave on functions.
+- We added `controlled_adam_project/examples/run_function_benchmark_report.py`.
+  It is intentionally self-contained and simple: nine existing 2D functions,
+  five fixed starts per function, and four optimizers.
+- The compared optimizers are vanilla Adam, controlled raw-rho Adam,
+  controlled EMA-rho Adam, and controlled EMA+trust Adam.
+- The generated local report is
+  `controlled_adam_project/outputs/function_report_multistart/FUNCTION_OPTIMIZATION_BENCHMARK_REPORT.md`.
+  Outputs are gitignored, so the tracked reference is
+  `FUNCTION_OPTIMIZATION_BENCHMARK_SUITE.md`.
+- We also generated a shorter manager-facing Adam report at
+  `controlled_adam_project/outputs/function_report_manager_trimmed/` using only
+  Quadratic, Beale, and Goldstein-Price. This is the better folder for a concise
+  update focused on controlled Adam's strengths.
+- Important result snapshot: controlled raw-rho ties or wins success rate on
+  all nine functions, EMA-rho ties or wins on seven, and vanilla Adam still
+  ties or wins several median residual comparisons when its fixed learning rate
+  happens to be well matched.
+- After the user asked why the trust-region method was absent from the
+  benchmark, we added `controlled_ema_trust` to the deterministic Adam report.
+  In the current trimmed three-function run, `median_trust_expansions` is `0.0`,
+  so EMA+trust overlaps EMA-rho there; it is present for consistency, not
+  because the trust expansion visibly activates on those plots.
+- The honest manager story is: the controller improves robustness and helps
+  especially on curved or scale-sensitive landscapes such as Rosenbrock, Beale,
+  and Goldstein-Price; it is not a global optimizer and does not solve local
+  basin traps on multimodal functions such as Rastrigin, Ackley, and Six-hump
+  camel.
+- The user then asked for the Muon variants too. We added
+  `controlled_muon_project/examples/run_function_benchmark_report.py`, which
+  compares `vanilla_muon`, `controlled_raw_rho`, `controlled_ema`, and
+  `controlled_ema_trust` on the same nine functions.
+- The Muon function report is generated at
+  `controlled_muon_project/outputs/function_report_multistart/FUNCTION_OPTIMIZATION_MUON_BENCHMARK_REPORT.md`.
+- We also generated a shorter Chinese manager-facing Muon report at
+  `controlled_muon_project/outputs/function_report_manager_trimmed/FUNCTION_OPTIMIZATION_MUON_BENCHMARK_REPORT_ZH.md`.
+- The earlier function-report-only `fixed_muon_direction` diagnostic was
+  removed because it duplicated `vanilla_muon` in the local 2D runner: both use
+  fixed alpha and no rho controller.
+- For 2D vector objectives, the Muon report uses a vector analogue: the
+  momentum vector is treated as a column matrix and orthogonalized with the
+  same utility used elsewhere in the Muon subproject.
+- Both Adam and Muon function reports now generate Chinese companion reports and
+  standalone `*_surface_3d.png` plots with formulas printed inside the figures.
+- The Muon result is more conservative than Adam: vanilla Muon is very
+  competitive on this suite, tying or winning success rate on all nine
+  objectives. Controlled Muon improves some cases, especially Quadratic
+  residuals, but does not dominate overall. This is useful because it shows the
+  controller is not automatically better for every base direction.
+
+- Candidate C was then run on the same three Fashion-MNIST CNN seeds with a
+  near-fixed Adam setting. It kept alpha close to `9.3e-4` and nudged
+  controlled_raw_rho slightly ahead of the other controlled variants, but it
+  still did not beat fixed Adam-direction on mean final accuracy. The
+  three-seed means were vanilla `0.8946`, fixed `0.8960`, raw-rho `0.8951`,
+  EMA `0.8937`, and EMA-trust `0.8937`.
+
+- Candidate B was run next with a faster-recovery setting
+  (`alpha_min=8e-4`, `alpha_max=1.5e-3`, `rho_star=0.70`, `kp=0.03`). It did
+  not improve the picture: mean final accuracies were vanilla `0.8946`, fixed
+  `0.8960`, raw-rho `0.8921`, EMA `0.8930`, and EMA-trust `0.8930`.
+- Added `--model resnet_cifar`, a compact CIFAR-friendly ResNet with
+  approximately 175k trainable parameters, and ran the staged 3-epoch 5k/1k
+  CIFAR-10 smoke test. The run completed cleanly. Final test accuracies were
+  vanilla `0.3610`, fixed `0.3730`, raw-rho `0.4100`, EMA `0.3800`, and
+  EMA-trust `0.3800`; all controlled variants accepted every step and kept
+  alpha near `1e-3`.
+- The next staged ResNet benchmark was expanded to 20 epochs on 10k train /
+  2k test, still with the balanced Adam-scale controller setting and full
+  ablation. It completed successfully with per-epoch checkpoints and progress
+  prints. Final / best test accuracy was: vanilla Adam `0.6915 / 0.6915`,
+  fixed Adam-direction `0.6875 / 0.6975`, raw-rho `0.7395 / 0.7395`, EMA
+  `0.7135 / 0.7135`, and EMA-trust `0.7135 / 0.7135`.
+- In this ResNet run, raw-rho was clearly best on the single seed. All
+  controlled/fixed variants accepted every step. Raw-rho, EMA, and EMA-trust
+  reached the `alpha_max=1.5e-3` cap by around the middle of training. EMA and
+  EMA-trust were numerically identical, so the trust-region expansion again
+  did not create a distinct trajectory under these conservative bounds.
+- Later, when the user asked why the three-seed trust summary matched EMA, we
+  checked the step diagnostics and found the exact cause: `controlled_ema_trust`
+  had `0/1580` trust expansions for each balanced ResNet seed (`123`, `456`,
+  `789`). The run used `alpha_min=1e-3`, but the trust trigger was
+  `trust_region_alpha_threshold=1e-4`, which is below the active alpha floor.
+  Therefore the trust branch was enabled but unreachable; in this benchmark,
+  EMA+trust should be treated as the same effective algorithm as EMA.
+- We concluded that a meaningful Adam-scale trust follow-up should keep
+  `alpha_min` near `1e-3` to avoid collapse, but raise
+  `trust_region_alpha_threshold` near the floor, such as `1e-3` or `1.05e-3`,
+  with a gentle `trust_region_expand_factor` such as `1.1` or `1.2`.
+- Two follow-up ResNet parameter tests were run. Candidate 1 raised
+  `alpha_max` to `1.75e-3` with a more cautious controller
+  (`rho_star=0.82`, `kp=0.015`), but it underperformed: raw-rho finished
+  `0.7120`, EMA/EMA-trust finished `0.6695`, and the higher cap did not help.
+- The stronger-fixed-LR control used `lr=1.5e-3` with the original
+  `alpha_max=1.5e-3`. Vanilla Adam improved to `0.7065`, fixed Adam-direction
+  reached best `0.7040`, and EMA/EMA-trust reached `0.7250`, but raw-rho only
+  reached `0.6985`. This suggests the original raw-rho `0.7395` result was not
+  merely because `1.5e-3` is a better fixed learning rate. Ramping from
+  `1e-3` to `1.5e-3` appears different from starting at `1.5e-3`.
+- We then ran the original balanced ResNet setting on two more seeds (`456`
+  and `789`) and combined them with the existing seed `123` run. Three-seed
+  final accuracy means were: vanilla `0.6887`, fixed `0.6938`, raw-rho
+  `0.7150`, EMA `0.7083`, and EMA-trust `0.7083`. Three-seed best accuracy
+  means were: vanilla `0.6998`, fixed `0.7118`, raw-rho `0.7235`, EMA
+  `0.7190`, and EMA-trust `0.7190`. This supports a modest controlled-optimizer
+  advantage on this setup, but also shows seed `123` raw-rho was unusually
+  strong.
 
 
 All projects use a `src/` layout, so commands should be run with
@@ -1438,3 +1560,68 @@ controlled optimizer too expensive. The answer was nuanced:
 On the small five-seed CPU diagnostic, elapsed times were noisy and comparable
 across vanilla and controlled Muon variants, so this run supports the idea that
 the overhead is manageable but is not a precise timing benchmark.
+
+## Function-Optimization Manager Reports And Rastrigin Basin Discussion
+
+The user wanted a longer version of the trimmed manager function report. We
+added a `--step-multiplier` CLI option to both Adam and Muon function report
+runners, then generated 3x and 10x versions of the three-function trimmed
+reports.
+
+The 10x Adam result changed the interpretation: vanilla Adam can catch up on
+some objectives when given many more iterations. That makes the honest manager
+claim narrower and stronger: controlled Adam often improves early/local
+progress and step-size robustness, but it is not guaranteed to dominate every
+eventual residual after very long local optimization.
+
+The user then asked about Rosenbrock, Himmelblau, and Rastrigin. We generated
+six-function 10x reports including those functions. Himmelblau was a clear
+controlled-Adam speed example: all Adam variants succeeded, but controlled Adam
+reached the success criterion much earlier. Rosenbrock showed a speed-versus-
+eventual-success tradeoff. Rastrigin showed the expected limitation: local
+optimizers generally settle into local basins rather than reliably finding the
+true global minimum.
+
+To aggregate over more initial conditions, we added
+`--random-starts-per-objective` and `--random-seed` to the function report
+runners and generated:
+
+```text
+controlled_adam_project/outputs/function_report_manager_extended_10x_15starts
+controlled_adam_project/outputs/function_report_manager_extended_10x_30starts
+controlled_adam_project/outputs/function_report_manager_extended_10x_60starts
+controlled_adam_project/outputs/function_report_manager_extended_60starts_default_steps
+```
+
+These broader-start reports gave the clearest version of the budget story. With
+normal/default iteration budgets and 60 starts, controlled Adam looks strong as
+a practical fixed-budget optimizer: Beale success is `33-37%` for controlled
+variants versus `5%` for vanilla, Rosenbrock is `28-32%` versus `8%`,
+Himmelblau is `97%` versus `92%`, and vanilla Adam has `0%` success on the
+ill-conditioned Quadratic within 300 steps. With 10x iteration budgets, vanilla
+Adam catches up on several functions, so the manager interpretation should be:
+controlled Adam gives faster useful progress under a limited budget; it is not
+a guarantee of best eventual performance after very long local optimization.
+
+Himmelblau remains the cleanest manager example. Rosenbrock is a good
+speed-versus-eventual-success example. Beale and Goldstein-Price are
+budget-sensitive: they favor controlled Adam under the normal budget, but the
+10x run is more nuanced.
+
+Finally, the user asked whether changing Rastrigin initial points was a good
+idea. We agreed that it is the right test, but should be framed as a
+basin-of-attraction benchmark rather than as cherry-picked starts. We added:
+
+```text
+controlled_adam_project/examples/run_rastrigin_basin_benchmark.py
+controlled_adam_project/outputs/rastrigin_basin_benchmark_30starts
+```
+
+The benchmark samples 30 starts per radius from `Uniform([-r, r]^2)` around the
+true minimizer `(0, 0)`. All methods succeed reliably up to radius `0.5`;
+success falls to about `57%` at radius `0.75`, about `23%` at radius `1.0`,
+and `0%` at radius `4.0`. Controlled Adam usually reaches success faster inside
+the correct basin, but it does not solve global basin selection. The important
+nuance for future reporting is: controlled Adam improves local convergence
+speed inside the right basin; Rastrigin from far-away starts needs multi-start
+or global exploration.

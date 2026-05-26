@@ -7,7 +7,7 @@ from typing import Optional
 
 import numpy as np
 
-from controlled_muon.objectives import MatrixQuadraticObjective
+from controlled_muon.objectives import MatrixQuadraticObjective, Objective
 from controlled_muon.orthogonalization import orthogonalize
 
 
@@ -18,8 +18,9 @@ class MuonConfig:
     momentum: float = 0.95
     nesterov: bool = True
     orthogonalizer: str = "newton_schulz"
-    ns_steps: int = 8
+    ns_steps: int = 5
     update_scale: float = 1.0
+    shape_scale: bool = True
 
     def __post_init__(self) -> None:
         if not 0 <= self.momentum < 1:
@@ -51,25 +52,47 @@ def _muon_direction(
     config: MuonConfig,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return Muon's proposed descent direction and updated momentum buffer."""
-    new_momentum = config.momentum * momentum_buffer + gradient
+    new_momentum = (1.0 - config.momentum) * gradient + config.momentum * momentum_buffer
 
     if config.nesterov:
-        matrix_to_orthogonalize = config.momentum * new_momentum + gradient
+        matrix_to_orthogonalize = (1.0 - config.momentum) * gradient + config.momentum * new_momentum
     else:
         matrix_to_orthogonalize = new_momentum
+
+    original_shape = matrix_to_orthogonalize.shape
+    if matrix_to_orthogonalize.ndim == 1:
+        matrix_to_orthogonalize = matrix_to_orthogonalize.reshape(-1, 1)
 
     ortho_update = orthogonalize(
         matrix_to_orthogonalize,
         method=config.orthogonalizer,
         ns_steps=config.ns_steps,
     )
+    if config.shape_scale and matrix_to_orthogonalize.ndim == 2:
+        rows, cols = matrix_to_orthogonalize.shape
+        ortho_update = ortho_update * np.sqrt(max(1.0, rows / max(cols, 1)))
+    ortho_update = ortho_update.reshape(original_shape)
 
     direction = -config.update_scale * ortho_update
     return direction, new_momentum
 
 
+def _distance_to_reference(objective: object, state: np.ndarray) -> float:
+    """Return a useful distance diagnostic for matrix or 2D toy objectives."""
+
+    if hasattr(objective, "distance_to_target"):
+        return float(objective.distance_to_target(state))
+    minima = getattr(objective, "global_minima", None)
+    if minima is None or len(minima) == 0:
+        return float("nan")
+    minima = np.asarray(minima, dtype=float)
+    state = np.asarray(state, dtype=float)
+    distances = np.linalg.norm(minima - state.reshape(1, -1), axis=1)
+    return float(np.min(distances))
+
+
 def vanilla_muon(
-    objective: MatrixQuadraticObjective,
+    objective: MatrixQuadraticObjective | Objective,
     W0: np.ndarray,
     eta: float,
     steps: int,
@@ -98,7 +121,7 @@ def vanilla_muon(
 
         Ws.append(W.copy())
         fs.append(objective.value(W))
-        distances.append(objective.distance_to_target(W))
+        distances.append(_distance_to_reference(objective, W))
         step_sizes.append(eta)
 
     return OptimizationHistory(
@@ -110,7 +133,7 @@ def vanilla_muon(
 
 
 def controlled_muon(
-    objective: MatrixQuadraticObjective,
+    objective: MatrixQuadraticObjective | Objective,
     W0: np.ndarray,
     alpha0: float,
     steps: int,
@@ -190,7 +213,7 @@ def controlled_muon(
 
         Ws.append(W.copy())
         fs.append(objective.value(W))
-        distances.append(objective.distance_to_target(W))
+        distances.append(_distance_to_reference(objective, W))
         alphas.append(alpha)
         rhos.append(rho)
         predicted_decreases.append(predicted_decrease)

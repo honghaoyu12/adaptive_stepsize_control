@@ -101,6 +101,10 @@ optimizer directions:
   the global multiplier.
 - `controlled_muon_project/`: Muon-style orthogonalization chooses the
   matrix-shaped direction; the controller chooses the global multiplier.
+- `pi_adam_optimizer/` and `pi_muon_optimizer/`: standalone PI-controller
+  versions of the Adam and Muon controllers, packaged as PyTorch optimizers.
+  PI Muon follows official `torch.optim.Muon` neural-network scope: Muon for
+  2D hidden matrix parameters and AdamW-style fallback for the rest.
 
 For a detailed transfer note for another machine or coding agent, read
 `PROJECT_HANDOFF.md`.
@@ -114,6 +118,10 @@ Project memory is split across four documents:
   machine or coding agent.
 - `OPTIMIZER_VARIANTS_BENCHMARK_REPORT.md` explains the five neural optimizer
   variants and compares their benchmark performance.
+- `FUNCTION_OPTIMIZATION_BENCHMARK_SUITE.md` explains the self-contained 2D
+  function benchmark suite for manager-facing optimizer behavior reports.
+- `OPTIMIZER_IMPLEMENTATION_AUDIT.md` records the latest AdamW/Muon
+  implementation audit and the remaining intentional differences from PyTorch.
 
 ---
 
@@ -155,6 +163,16 @@ outputs/objective_value.png
 outputs/adaptive_step_size.png
 outputs/rho_ratio.png
 outputs/trajectory.png
+```
+
+Current output cleanup note: older experimental results were archived into
+timestamped backup folders so new runs can write to clean top-level output
+directories:
+
+```text
+outputs/backup_20260526_182414/
+controlled_adam_project/outputs/backup_20260526_182414/
+controlled_muon_project/outputs/backup_20260526_182414/
 ```
 
 ---
@@ -203,8 +221,17 @@ comparisons on MNIST, Fashion-MNIST, and CIFAR-10. Run it from
 
 ```bash
 PYTHONPATH=src python examples/run_demo.py
+MPLCONFIGDIR=/private/tmp PYTHONPATH=src python examples/run_function_benchmark_report.py
 PYTHONPATH=src python examples/run_mnist_demo.py --dataset fashion_mnist --download --ablation
 ```
+
+For manager-facing deterministic function comparisons, use
+`FUNCTION_OPTIMIZATION_BENCHMARK_SUITE.md`. It describes the nine-function,
+five-start suite and regenerates a standalone report at
+`controlled_adam_project/outputs/function_report_multistart/FUNCTION_OPTIMIZATION_BENCHMARK_REPORT.md`.
+It also documents the newer longer manager reports, the 15-start aggregate
+and 60-start aggregate function reports, and the focused Rastrigin basin benchmark at
+`controlled_adam_project/outputs/rastrigin_basin_benchmark_30starts/`.
 
 The image benchmark runner supports long-run visibility with
 `--print-every N` and `--checkpoint-every N`.
@@ -270,9 +297,13 @@ Run it from `controlled_muon_project/`:
 
 ```bash
 PYTHONPATH=src python examples/run_matrix_quadratic_demo.py
+MPLCONFIGDIR=/private/tmp PYTHONPATH=src python examples/run_function_benchmark_report.py
 PYTHONPATH=src python examples/run_mnist_demo.py --dataset fashion_mnist --download --ablation
 ```
 
 The current PyTorch Muon implementation is intentionally educational and uses
 CPU/NumPy orthogonalization, so CIFAR-10 runs are slower than the Adam runs.
 Add progress logging before running larger Muon experiments.
+
+The Muon function report is generated at
+`controlled_muon_project/outputs/function_report_multistart/FUNCTION_OPTIMIZATION_MUON_BENCHMARK_REPORT.md`.

@@ -15,7 +15,12 @@ from controlled_muon.objectives import (
 )
 from controlled_muon.optimizers import OptimizationHistory, controlled_muon, vanilla_muon
 from controlled_muon.orthogonalization import orthogonalize
-from controlled_muon.torch_optimizers import ControlledMuonStep, MuonConfig, TorchControlledMuon
+from controlled_muon.torch_optimizers import (
+    ControlledMuonStep,
+    MuonConfig,
+    TorchControlledMuon,
+    default_muon_param_groups,
+)
 
 __all__ = [
     "Ackley",
@@ -34,6 +39,7 @@ __all__ = [
     "SixHumpCamel",
     "TorchControlledMuon",
     "controlled_muon",
+    "default_muon_param_groups",
     "orthogonalize",
     "vanilla_muon",
 ]

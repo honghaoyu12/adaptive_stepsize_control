@@ -6,6 +6,7 @@ import argparse
 import csv
 import gzip
 import json
+import math
 import random
 import re
 import struct
@@ -20,7 +21,12 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Subset, TensorDataset
 
-from controlled_muon.torch_optimizers import ControlledMuonStep, MuonConfig, TorchControlledMuon
+from controlled_muon.torch_optimizers import (
+    ControlledMuonStep,
+    MuonConfig,
+    TorchControlledMuon,
+    default_muon_param_groups,
+)
 
 
 CIFAR10_MEAN = (0.4914, 0.4822, 0.4465)
@@ -78,16 +84,99 @@ class SmallCIFARCNN(nn.Module):
         return self.classifier(self.features(x))
 
 
+class BasicBlock(nn.Module):
+    """Small ResNet basic block for CIFAR-sized inputs."""
+
+    expansion = 1
+
+    def __init__(self, in_channels: int, out_channels: int, stride: int = 1) -> None:
+        super().__init__()
+        self.conv1 = nn.Conv2d(
+            in_channels,
+            out_channels,
+            kernel_size=3,
+            stride=stride,
+            padding=1,
+            bias=False,
+        )
+        self.bn1 = nn.BatchNorm2d(out_channels)
+        self.relu = nn.ReLU(inplace=True)
+        self.conv2 = nn.Conv2d(
+            out_channels,
+            out_channels,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            bias=False,
+        )
+        self.bn2 = nn.BatchNorm2d(out_channels)
+        self.downsample = None
+        if stride != 1 or in_channels != out_channels:
+            self.downsample = nn.Sequential(
+                nn.Conv2d(
+                    in_channels,
+                    out_channels,
+                    kernel_size=1,
+                    stride=stride,
+                    bias=False,
+                ),
+                nn.BatchNorm2d(out_channels),
+            )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        identity = x
+        out = self.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        if self.downsample is not None:
+            identity = self.downsample(identity)
+        out = self.relu(out + identity)
+        return out
+
+
+class SmallCIFARResNet(nn.Module):
+    """Compact ResNet matching the Adam CIFAR-10 ResNet benchmark."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.stem = nn.Sequential(
+            nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.BatchNorm2d(16),
+            nn.ReLU(inplace=True),
+        )
+        self.layer1 = self._make_layer(16, 16, blocks=2, stride=1)
+        self.layer2 = self._make_layer(16, 32, blocks=2, stride=2)
+        self.layer3 = self._make_layer(32, 64, blocks=2, stride=2)
+        self.pool = nn.AdaptiveAvgPool2d((1, 1))
+        self.fc = nn.Linear(64, 10)
+
+    def _make_layer(
+        self,
+        in_channels: int,
+        out_channels: int,
+        blocks: int,
+        stride: int,
+    ) -> nn.Sequential:
+        layers = [BasicBlock(in_channels, out_channels, stride=stride)]
+        for _ in range(1, blocks):
+            layers.append(BasicBlock(out_channels, out_channels, stride=1))
+        return nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.stem(x)
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.pool(x)
+        x = torch.flatten(x, 1)
+        return self.fc(x)
+
+
 def _reshape_param_for_muon(param: torch.Tensor) -> tuple[torch.Tensor, tuple[int, ...]]:
     shape = tuple(param.shape)
-    if param.ndim == 0:
-        raise ValueError("Muon parameters must have at least one dimension.")
-    if param.ndim == 1:
-        matrix = param.detach().clone().reshape(-1, 1)
-    elif param.ndim == 2:
+    if param.ndim == 2:
         matrix = param.detach().clone()
     else:
-        matrix = param.detach().clone().reshape(param.shape[0], -1)
+        raise ValueError("Official-style Muon supports only 2D tensors.")
     return matrix, shape
 
 
@@ -96,17 +185,46 @@ def _direction_for_param(
     momentum_buffer: torch.Tensor,
     config: MuonConfig,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    new_momentum = config.momentum * momentum_buffer + grad
+    new_momentum = momentum_buffer.lerp(grad, 1.0 - config.momentum)
     if config.nesterov:
-        matrix_to_orthogonalize = config.momentum * new_momentum + grad
+        matrix_to_orthogonalize = grad.lerp(new_momentum, config.momentum)
     else:
         matrix_to_orthogonalize = new_momentum
     matrix, shape = _reshape_param_for_muon(matrix_to_orthogonalize)
     from controlled_muon.orthogonalization import orthogonalize
 
     ortho_update = orthogonalize(matrix.cpu().numpy(), method=config.orthogonalizer, ns_steps=config.ns_steps)
+    if config.shape_scale:
+        rows, cols = matrix.shape
+        ortho_update = ortho_update * math.sqrt(max(1.0, rows / max(cols, 1)))
     direction = -config.update_scale * torch.from_numpy(ortho_update).to(device=grad.device, dtype=grad.dtype).reshape(shape)
     return direction, new_momentum
+
+
+@torch.no_grad()
+def _adamw_direction_for_param(
+    grad: torch.Tensor,
+    state: dict[str, torch.Tensor | int],
+    betas: tuple[float, float] = (0.9, 0.999),
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    beta1, beta2 = betas
+    if "step" not in state:
+        state["step"] = 0
+        state["exp_avg"] = torch.zeros_like(grad)
+        state["exp_avg_sq"] = torch.zeros_like(grad)
+    state["step"] = int(state["step"]) + 1
+    exp_avg = state["exp_avg"]
+    exp_avg_sq = state["exp_avg_sq"]
+    assert isinstance(exp_avg, torch.Tensor)
+    assert isinstance(exp_avg_sq, torch.Tensor)
+    exp_avg.mul_(beta1).add_(grad, alpha=1.0 - beta1)
+    exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
+    step = int(state["step"])
+    bias_correction1 = 1.0 - beta1**step
+    bias_correction2 = 1.0 - beta2**step
+    denom = exp_avg_sq.sqrt().div(np.sqrt(bias_correction2)).add_(eps)
+    return -exp_avg.div(bias_correction1).div(denom)
 
 
 def make_model(model_name: str, dataset_name: str) -> nn.Module:
@@ -120,6 +238,10 @@ def make_model(model_name: str, dataset_name: str) -> nn.Module:
         if dataset_name != "cifar10":
             raise ValueError("The CNN model is currently configured for CIFAR-10 RGB inputs.")
         return SmallCIFARCNN()
+    if model_name == "resnet_cifar":
+        if dataset_name != "cifar10":
+            raise ValueError("The CIFAR ResNet model is currently configured for CIFAR-10 RGB inputs.")
+        return SmallCIFARResNet()
     raise ValueError(f"Unknown model: {model_name}")
 
 
@@ -394,12 +516,18 @@ def train_vanilla_muon(
     lr: float,
     seed: int,
     config: MuonConfig,
+    weight_decay: float = 0.0,
     run_name: str = "vanilla_muon",
     progress: ProgressConfig | None = None,
 ) -> list[EpochMetrics]:
     metrics = []
     config = config
-    momentum_buffers = [torch.zeros_like(param) for param in model.parameters() if param.requires_grad]
+    muon_params_list, adamw_params_list = default_muon_param_groups(model.named_parameters())
+    muon_params = set(muon_params_list)
+    momentum_buffers = {param: torch.zeros_like(param) for param in muon_params_list}
+    adamw_states: dict[torch.nn.Parameter, dict[str, torch.Tensor | int]] = {
+        param: {} for param in adamw_params_list
+    }
     run_start_time = time.perf_counter()
     optimizer_steps = 0
     for epoch in range(1, epochs + 1):
@@ -415,12 +543,25 @@ def train_vanilla_muon(
             loss = criterion(model(x), y)
             loss.backward()
             with torch.no_grad():
-                muon_params = [param for param in model.parameters() if param.requires_grad]
-                for idx, param in enumerate(muon_params):
+                for param in model.parameters():
+                    if not param.requires_grad:
+                        continue
                     if param.grad is None:
                         continue
-                    direction, new_momentum = _direction_for_param(param.grad.detach(), momentum_buffers[idx], config)
-                    momentum_buffers[idx] = new_momentum
+                    if param in muon_params and param.ndim == 2:
+                        direction, new_momentum = _direction_for_param(
+                            param.grad.detach(),
+                            momentum_buffers[param],
+                            config,
+                        )
+                        momentum_buffers[param] = new_momentum
+                    else:
+                        direction = _adamw_direction_for_param(
+                            param.grad.detach(),
+                            adamw_states[param],
+                        )
+                    if weight_decay != 0.0:
+                        param.mul_(1.0 - lr * weight_decay)
                     param.add_(direction, alpha=lr)
             optimizer_steps += 1
         train_loss, train_accuracy = evaluate(model, eval_train_loader, criterion, device)
@@ -464,11 +605,13 @@ def train_controlled_muon(
     seed: int,
     use_rho_ema: bool = True,
     reject_bad_steps: bool = True,
+    weight_decay: float = 0.0,
     run_name: str = "controlled_muon",
     progress: ProgressConfig | None = None,
 ) -> tuple[list[EpochMetrics], list[ControlledMuonStep]]:
+    muon_params, adamw_params = default_muon_param_groups(model.named_parameters())
     optimizer = TorchControlledMuon(
-        model.parameters(),
+        (muon_params, adamw_params),
         alpha0=alpha0,
         config=MuonConfig(),
         kp=kp,
@@ -485,6 +628,7 @@ def train_controlled_muon(
         trust_region_expand_factor=trust_region_expand_factor,
         reject_bad_steps=reject_bad_steps,
         max_backtracks=3,
+        weight_decay=weight_decay,
     )
     metrics = []
     step_logs = []
@@ -762,14 +906,16 @@ def optimizer_variant_specs(args: argparse.Namespace) -> list[dict[str, object]]
     variants = [
         {
             "name": "vanilla_muon",
-            "type": "fixed-step Muon implemented in this runner",
+            "type": "fixed-step official-style Muon implemented in this runner",
             "learning_rate": args.lr,
-            "direction": "Muon-like matrix orthogonalization",
+            "direction": "Muon on 2D hidden matrix parameters with AdamW fallback",
+            "weight_decay": args.weight_decay,
         }
     ]
     controlled_common = {
-        "direction": "Muon orthogonalized direction with same-minibatch actual/predicted controller",
+        "direction": "Official-style Muon/AdamW direction with same-minibatch actual/predicted controller",
         "alpha0": args.lr,
+        "weight_decay": args.weight_decay,
         "kp": args.controlled_kp,
         "rho_star": args.controlled_rho_star,
         "rho_beta": args.controlled_rho_beta,
@@ -859,13 +1005,14 @@ def save_run_metadata(output_dir: Path, args: argparse.Namespace, dataset_bundle
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", choices=["mnist", "fashion_mnist", "cifar10"], default="fashion_mnist")
-    parser.add_argument("--model", choices=["auto", "mlp", "cnn"], default="auto")
+    parser.add_argument("--model", choices=["auto", "mlp", "cnn", "resnet_cifar"], default="auto")
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--train-subset", type=int, default=4096)
     parser.add_argument("--test-subset", type=int, default=1024)
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--controlled-kp", type=float, default=0.05)
     parser.add_argument("--controlled-rho-star", type=float, default=0.7)
     parser.add_argument("--controlled-rho-beta", type=float, default=0.9)
@@ -936,6 +1083,7 @@ def run_controlled_variant(
         args.seed,
         use_rho_ema=use_rho_ema,
         reject_bad_steps=reject_bad_steps,
+        weight_decay=args.weight_decay,
         run_name=name,
         progress=progress,
     )
@@ -978,6 +1126,7 @@ def main() -> None:
         args.lr,
         args.seed,
         MuonConfig(),
+        weight_decay=args.weight_decay,
         run_name="vanilla_muon",
         progress=progress,
     )

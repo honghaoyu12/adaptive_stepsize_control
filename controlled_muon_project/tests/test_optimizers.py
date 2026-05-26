@@ -38,6 +38,33 @@ def test_vanilla_muon_runs() -> None:
     assert history.fs[-1] < objective.value(W0)
 
 
+def test_newton_schulz_defaults_match_muon_quintic_iteration() -> None:
+    A = np.array([[1.0, 2.0], [3.0, -1.0], [0.5, 0.25]])
+    Q = orthogonalize(A, method="newton_schulz", ns_steps=5)
+    X = A.T / np.linalg.norm(A, ord="fro")
+    a, b, c = (3.4445, -4.7750, 2.0315)
+    for _ in range(5):
+        gram = X @ X.T
+        X = a * X + (b * gram + c * (gram @ gram)) @ X
+    expected = X.T
+
+    np.testing.assert_allclose(Q, expected)
+
+
+def test_muon_direction_applies_shape_scaling_by_default() -> None:
+    objective = MatrixQuadraticObjective.random_anisotropic(shape=(4, 2), seed=3)
+    W0 = np.zeros_like(objective.target)
+    scaled_config = MuonConfig(momentum=0.0, nesterov=False, shape_scale=True)
+    unscaled_config = MuonConfig(momentum=0.0, nesterov=False, shape_scale=False)
+
+    scaled = vanilla_muon(objective, W0, eta=0.01, steps=1, config=scaled_config)
+    unscaled = vanilla_muon(objective, W0, eta=0.01, steps=1, config=unscaled_config)
+    scaled_step = scaled.Ws[0] - W0
+    unscaled_step = unscaled.Ws[0] - W0
+
+    np.testing.assert_allclose(scaled_step, unscaled_step * np.sqrt(2.0), rtol=1e-6, atol=1e-8)
+
+
 def test_controlled_muon_reduces_objective() -> None:
     objective = MatrixQuadraticObjective.random_anisotropic(shape=(6, 4), seed=2)
     W0 = np.zeros_like(objective.target)

@@ -25,6 +25,14 @@ from controlled_adam.torch_optimizers import ControlledAdamStep, TorchControlled
 
 CIFAR10_MEAN = (0.4914, 0.4822, 0.4465)
 CIFAR10_STD = (0.2470, 0.2435, 0.2616)
+OPTIMIZER_VARIANTS = (
+    "vanilla_adam",
+    "fixed_adam_direction",
+    "controlled_raw_rho",
+    "controlled_ema",
+    "controlled_ema_trust",
+    "controlled_adam",
+)
 
 
 class SmallMLP(nn.Module):
@@ -132,6 +140,93 @@ class LeNetCIFAR(nn.Module):
         return self.net(x)
 
 
+class BasicBlock(nn.Module):
+    """Small ResNet basic block for CIFAR-sized inputs."""
+
+    expansion = 1
+
+    def __init__(self, in_channels: int, out_channels: int, stride: int = 1) -> None:
+        super().__init__()
+        self.conv1 = nn.Conv2d(
+            in_channels,
+            out_channels,
+            kernel_size=3,
+            stride=stride,
+            padding=1,
+            bias=False,
+        )
+        self.bn1 = nn.BatchNorm2d(out_channels)
+        self.relu = nn.ReLU(inplace=True)
+        self.conv2 = nn.Conv2d(
+            out_channels,
+            out_channels,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            bias=False,
+        )
+        self.bn2 = nn.BatchNorm2d(out_channels)
+        self.downsample = None
+        if stride != 1 or in_channels != out_channels:
+            self.downsample = nn.Sequential(
+                nn.Conv2d(
+                    in_channels,
+                    out_channels,
+                    kernel_size=1,
+                    stride=stride,
+                    bias=False,
+                ),
+                nn.BatchNorm2d(out_channels),
+            )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        identity = x
+        out = self.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        if self.downsample is not None:
+            identity = self.downsample(identity)
+        out = self.relu(out + identity)
+        return out
+
+
+class SmallCIFARResNet(nn.Module):
+    """Compact ResNet for CIFAR-10 smoke testing."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.stem = nn.Sequential(
+            nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.BatchNorm2d(16),
+            nn.ReLU(inplace=True),
+        )
+        self.layer1 = self._make_layer(16, 16, blocks=2, stride=1)
+        self.layer2 = self._make_layer(16, 32, blocks=2, stride=2)
+        self.layer3 = self._make_layer(32, 64, blocks=2, stride=2)
+        self.pool = nn.AdaptiveAvgPool2d((1, 1))
+        self.fc = nn.Linear(64, 10)
+
+    def _make_layer(
+        self,
+        in_channels: int,
+        out_channels: int,
+        blocks: int,
+        stride: int,
+    ) -> nn.Sequential:
+        layers = [BasicBlock(in_channels, out_channels, stride=stride)]
+        for _ in range(1, blocks):
+            layers.append(BasicBlock(out_channels, out_channels, stride=1))
+        return nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.stem(x)
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.pool(x)
+        x = torch.flatten(x, 1)
+        return self.fc(x)
+
+
 def make_model(model_name: str, dataset_name: str) -> nn.Module:
     """Build a classifier compatible with the resolved dataset."""
     if model_name == "auto":
@@ -152,6 +247,10 @@ def make_model(model_name: str, dataset_name: str) -> nn.Module:
         if dataset_name != "cifar10":
             raise ValueError("The LeNet CIFAR model is currently configured for CIFAR-10 RGB inputs.")
         return LeNetCIFAR()
+    if model_name == "resnet_cifar":
+        if dataset_name != "cifar10":
+            raise ValueError("The CIFAR ResNet model is currently configured for CIFAR-10 RGB inputs.")
+        return SmallCIFARResNet()
     raise ValueError(f"Unknown model: {model_name}")
 
 
@@ -818,13 +917,7 @@ def count_parameters(model: nn.Module) -> int:
 
 def optimizer_variant_specs(args: argparse.Namespace) -> list[dict[str, object]]:
     """Describe optimizer variants used by this run."""
-    variants: list[dict[str, object]] = [
-        {
-            "name": "vanilla_adam",
-            "type": "torch.optim.Adam",
-            "learning_rate": args.lr,
-        }
-    ]
+    variants: list[dict[str, object]] = []
     controlled_common = {
         "direction": "Adam moments with same-minibatch actual/predicted controller",
         "alpha0": args.lr,
@@ -842,48 +935,62 @@ def optimizer_variant_specs(args: argparse.Namespace) -> list[dict[str, object]]
         "max_backtracks": 3,
         "same_minibatch_trial_loss": True,
     }
+    specs = {
+        "vanilla_adam": {
+            "name": "vanilla_adam",
+            "type": "torch.optim.Adam",
+            "learning_rate": args.lr,
+        },
+        "fixed_adam_direction": {
+            "name": "fixed_adam_direction",
+            "type": "TorchControlledAdam direction with fixed alpha",
+            "alpha": args.lr,
+            "reject_bad_steps": False,
+        },
+        "controlled_raw_rho": {
+            **controlled_common,
+            "name": "controlled_raw_rho",
+            "use_rho_ema": False,
+            "trust_region_expand": False,
+            "reject_bad_steps": True,
+        },
+        "controlled_ema": {
+            **controlled_common,
+            "name": "controlled_ema",
+            "use_rho_ema": True,
+            "trust_region_expand": False,
+            "reject_bad_steps": True,
+        },
+        "controlled_ema_trust": {
+            **controlled_common,
+            "name": "controlled_ema_trust",
+            "use_rho_ema": True,
+            "reject_bad_steps": True,
+        },
+        "controlled_adam": {
+            **controlled_common,
+            "name": "controlled_adam",
+            "use_rho_ema": True,
+            "reject_bad_steps": True,
+        },
+    }
 
+    return [specs[name] for name in selected_variants(args)]
+
+
+def selected_variants(args: argparse.Namespace) -> list[str]:
+    """Resolve which optimizer variants should run."""
+    if args.variants:
+        return list(dict.fromkeys(args.variants))
     if args.ablation:
-        variants.extend(
-            [
-                {
-                    "name": "fixed_adam_direction",
-                    "type": "TorchControlledAdam direction with fixed alpha",
-                    "alpha": args.lr,
-                    "reject_bad_steps": False,
-                },
-                {
-                    **controlled_common,
-                    "name": "controlled_raw_rho",
-                    "use_rho_ema": False,
-                    "trust_region_expand": False,
-                    "reject_bad_steps": True,
-                },
-                {
-                    **controlled_common,
-                    "name": "controlled_ema",
-                    "use_rho_ema": True,
-                    "trust_region_expand": False,
-                    "reject_bad_steps": True,
-                },
-                {
-                    **controlled_common,
-                    "name": "controlled_ema_trust",
-                    "use_rho_ema": True,
-                    "reject_bad_steps": True,
-                },
-            ]
-        )
-    else:
-        variants.append(
-            {
-                **controlled_common,
-                "name": "controlled_adam",
-                "use_rho_ema": True,
-                "reject_bad_steps": True,
-            }
-        )
-    return variants
+        return [
+            "vanilla_adam",
+            "fixed_adam_direction",
+            "controlled_raw_rho",
+            "controlled_ema",
+            "controlled_ema_trust",
+        ]
+    return ["vanilla_adam", "controlled_adam"]
 
 
 def save_run_metadata(
@@ -940,6 +1047,7 @@ def save_run_metadata(
             ],
             "checkpoint_every": args.checkpoint_every,
             "print_every": args.print_every,
+            "optimizer_variants_requested": selected_variants(args),
         },
         "optimizers": optimizer_variant_specs(args),
     }
@@ -1149,7 +1257,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--model",
-        choices=["auto", "mlp", "cnn", "lenet_cifar", "fashion_cnn"],
+        choices=["auto", "mlp", "cnn", "lenet_cifar", "resnet_cifar", "fashion_cnn"],
         default="auto",
         help="Classifier architecture. Auto uses CNN for CIFAR-10 and MLP otherwise.",
     )
@@ -1178,6 +1286,16 @@ def parse_args() -> argparse.Namespace:
         "--ablation",
         action="store_true",
         help="Run Adam-direction ablations instead of only vanilla vs controlled.",
+    )
+    parser.add_argument(
+        "--variants",
+        nargs="+",
+        choices=OPTIMIZER_VARIANTS,
+        default=None,
+        help=(
+            "Explicit optimizer variants to run. Overrides --ablation and is "
+            "useful for reduced long-running benchmark suites."
+        ),
     )
     parser.add_argument("--data-dir", type=Path, default=Path("data"))
     parser.add_argument(
@@ -1299,24 +1417,27 @@ def main() -> None:
     criterion = nn.CrossEntropyLoss()
     runs = []
 
-    vanilla_model = make_model(args.model, dataset_name).to(device)
-    vanilla_model.load_state_dict(base_state)
-    vanilla_metrics = train_vanilla_adam(
-        vanilla_model,
-        make_loader(train_data, args.batch_size, True, args.seed),
-        eval_train_loader,
-        eval_test_loader,
-        criterion,
-        device,
-        args.epochs,
-        args.lr,
-        args.seed,
-        run_name="vanilla_adam",
-        checkpoint=checkpoint,
-    )
-    runs.append(OptimizerRun("vanilla_adam", vanilla_metrics))
+    variants = selected_variants(args)
 
-    if args.ablation:
+    if "vanilla_adam" in variants:
+        vanilla_model = make_model(args.model, dataset_name).to(device)
+        vanilla_model.load_state_dict(base_state)
+        vanilla_metrics = train_vanilla_adam(
+            vanilla_model,
+            make_loader(train_data, args.batch_size, True, args.seed),
+            eval_train_loader,
+            eval_test_loader,
+            criterion,
+            device,
+            args.epochs,
+            args.lr,
+            args.seed,
+            run_name="vanilla_adam",
+            checkpoint=checkpoint,
+        )
+        runs.append(OptimizerRun("vanilla_adam", vanilla_metrics))
+
+    if "fixed_adam_direction" in variants:
         runs.append(
             run_controlled_variant(
                 "fixed_adam_direction",
@@ -1341,6 +1462,7 @@ def main() -> None:
                 checkpoint=checkpoint,
             )
         )
+    if "controlled_raw_rho" in variants:
         runs.append(
             run_controlled_variant(
                 "controlled_raw_rho",
@@ -1363,6 +1485,7 @@ def main() -> None:
                 checkpoint=checkpoint,
             )
         )
+    if "controlled_ema" in variants:
         runs.append(
             run_controlled_variant(
                 "controlled_ema",
@@ -1385,6 +1508,7 @@ def main() -> None:
                 checkpoint=checkpoint,
             )
         )
+    if "controlled_ema_trust" in variants:
         runs.append(
             run_controlled_variant(
                 "controlled_ema_trust",
@@ -1407,7 +1531,7 @@ def main() -> None:
                 checkpoint=checkpoint,
             )
         )
-    else:
+    if "controlled_adam" in variants:
         runs.append(
             run_controlled_variant(
                 "controlled_adam",
