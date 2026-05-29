@@ -721,6 +721,7 @@ def train_controlled_adam(
     epochs: int,
     alpha0: float,
     kp: float,
+    kp_down: float | None,
     rho_star: float,
     rho_beta: float,
     alpha_min: float,
@@ -736,13 +737,18 @@ def train_controlled_adam(
     reject_bad_steps: bool = True,
     run_name: str = "controlled_adam",
     checkpoint: CheckpointConfig | None = None,
+    max_backtracks: int = 3,
+    backtrack_shrink: float = 0.5,
+    rho_min: float = 0.0,
 ) -> tuple[list[EpochMetrics], list[ControlledAdamStep]]:
     """Train a model with same-minibatch controlled Adam."""
     optimizer = TorchControlledAdam(
         model.parameters(),
         alpha0=alpha0,
         kp=kp,
+        kp_down=kp_down,
         rho_star=rho_star,
+        rho_min=rho_min,
         alpha_min=alpha_min,
         alpha_max=alpha_max,
         rho_beta=rho_beta,
@@ -754,7 +760,8 @@ def train_controlled_adam(
         trust_region_alpha_threshold=trust_region_alpha_threshold,
         trust_region_expand_factor=trust_region_expand_factor,
         reject_bad_steps=reject_bad_steps,
-        max_backtracks=3,
+        max_backtracks=max_backtracks,
+        backtrack_shrink=backtrack_shrink,
     )
     metrics = []
     step_logs = []
@@ -922,6 +929,7 @@ def optimizer_variant_specs(args: argparse.Namespace) -> list[dict[str, object]]
         "direction": "Adam moments with same-minibatch actual/predicted controller",
         "alpha0": args.lr,
         "kp": args.controlled_kp,
+        "kp_down": args.controlled_kp_down,
         "rho_star": args.controlled_rho_star,
         "rho_beta": args.controlled_rho_beta,
         "alpha_min": args.controlled_alpha_min,
@@ -1268,6 +1276,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--controlled-kp", type=float, default=0.05)
+    parser.add_argument("--controlled-kp-down", type=float)
     parser.add_argument("--controlled-rho-star", type=float, default=0.7)
     parser.add_argument("--controlled-rho-beta", type=float, default=0.9)
     parser.add_argument("--controlled-alpha-min", type=float, default=1e-5)
@@ -1341,6 +1350,7 @@ def run_controlled_variant(
     trust_region_expand: bool,
     use_rho_ema: bool,
     reject_bad_steps: bool,
+    kp_down: float | None = None,
     alpha_min: float | None = None,
     alpha_max: float | None = None,
     checkpoint: CheckpointConfig | None = None,
@@ -1359,6 +1369,7 @@ def run_controlled_variant(
         args.epochs,
         alpha0,
         kp,
+        kp_down,
         args.controlled_rho_star,
         rho_beta,
         args.controlled_alpha_min if alpha_min is None else alpha_min,
@@ -1476,6 +1487,7 @@ def main() -> None:
                 dataset_name,
                 alpha0=args.lr,
                 kp=args.controlled_kp,
+                kp_down=args.controlled_kp_down,
                 rho_beta=0.0,
                 min_alpha_factor=args.controlled_min_alpha_factor,
                 max_alpha_factor=args.controlled_max_alpha_factor,
@@ -1499,6 +1511,7 @@ def main() -> None:
                 dataset_name,
                 alpha0=args.lr,
                 kp=args.controlled_kp,
+                kp_down=args.controlled_kp_down,
                 rho_beta=args.controlled_rho_beta,
                 min_alpha_factor=args.controlled_min_alpha_factor,
                 max_alpha_factor=args.controlled_max_alpha_factor,
@@ -1522,6 +1535,7 @@ def main() -> None:
                 dataset_name,
                 alpha0=args.lr,
                 kp=args.controlled_kp,
+                kp_down=args.controlled_kp_down,
                 rho_beta=args.controlled_rho_beta,
                 min_alpha_factor=args.controlled_min_alpha_factor,
                 max_alpha_factor=args.controlled_max_alpha_factor,
@@ -1545,6 +1559,7 @@ def main() -> None:
                 dataset_name,
                 alpha0=args.lr,
                 kp=args.controlled_kp,
+                kp_down=args.controlled_kp_down,
                 rho_beta=args.controlled_rho_beta,
                 min_alpha_factor=args.controlled_min_alpha_factor,
                 max_alpha_factor=args.controlled_max_alpha_factor,

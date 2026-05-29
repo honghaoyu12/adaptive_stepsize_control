@@ -102,6 +102,7 @@ def controlled_adam(
     beta2: float = 0.999,
     eps: float = 1e-8,
     kp: float = 0.2,
+    kp_down: float | None = None,
     rho_star: float = 0.5,
     rho_min: float = 0.0,
     alpha_min: float = 1e-8,
@@ -130,6 +131,9 @@ def controlled_adam(
 
         alpha_{t+1} = alpha_t * exp(kp * (rho_t - rho_star)).
 
+    If ``kp_down`` is provided, it is used instead of ``kp`` when
+    ``rho_t < rho_star`` so decreases can be stronger than increases.
+
     This implementation optionally performs a small amount of backtracking if
     the first proposed step is rejected. This makes the method closer to a
     line-search/trust-region method while preserving the outer-loop controller.
@@ -137,6 +141,8 @@ def controlled_adam(
     _validate_common(steps, alpha0)
     if kp < 0:
         raise ValueError("kp must be non-negative.")
+    if kp_down is not None and kp_down < 0:
+        raise ValueError("kp_down must be non-negative when provided.")
     if not (0.0 < alpha_min <= alpha_max):
         raise ValueError("alpha bounds must satisfy 0 < alpha_min <= alpha_max.")
     if not (0.0 < non_descent_shrink < 1.0):
@@ -150,6 +156,7 @@ def controlled_adam(
     alpha = float(np.clip(alpha0, alpha_min, alpha_max))
     m = np.zeros_like(x)
     v = np.zeros_like(x)
+    kp_decrease = kp if kp_down is None else kp_down
 
     xs = [x.copy()]
     fs = [objective.value(x)]
@@ -213,7 +220,9 @@ def controlled_adam(
                 trial_alpha = max(alpha_min, trial_alpha * backtrack_shrink)
 
             if step_accepted:
-                alpha = alpha_used * float(np.exp(kp * (rho - rho_star)))
+                error = rho - rho_star
+                gain = kp if error >= 0.0 else kp_decrease
+                alpha = alpha_used * float(np.exp(gain * error))
             else:
                 # If every trial failed, keep x fixed and shrink alpha.
                 alpha = alpha_used * backtrack_shrink

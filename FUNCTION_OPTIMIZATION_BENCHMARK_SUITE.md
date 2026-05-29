@@ -1,6 +1,6 @@
 # Function Optimization Benchmark Suite
 
-Last updated: 2026-05-26
+Last updated: 2026-05-27
 
 This document describes the simple deterministic benchmark suites for explaining
 how the controlled optimizers behave on hand-written 2D functions. It is meant
@@ -272,6 +272,291 @@ Goldstein-Price, gives a cleaner manager story:
 In that trimmed run, `median_trust_expansions` is `0.0` for the selected
 objectives, so EMA+trust should be described as included for completeness rather
 than as an independently demonstrated improvement on those plots.
+
+## Controlled Adam Parameter Tuning
+
+After the 30-run Adam-vs-SGD function benchmark, we tuned the three controlled
+Adam families directly on the same nine deterministic functions with 30 starts
+per function. These sweeps answer a narrower question than the main benchmark:
+if the Adam direction and objective suite are fixed, can the raw-rho, EMA-rho,
+and EMA+trust controllers be parameterized better than the current report
+defaults?
+
+The tuning scripts are:
+
+```text
+controlled_adam_project/examples/run_controlled_adam_parameter_sweep.py
+controlled_adam_project/examples/run_controlled_adam_tuning_sweep.py
+controlled_adam_project/examples/run_controlled_adam_refined_tuning_sweep.py
+```
+
+The diagnostic, broad, and refined output folders are:
+
+```text
+outputs/controlled_adam_parameter_sweep_30runs/
+outputs/controlled_adam_tuning_sweep_30runs/
+outputs/controlled_adam_refined_tuning_sweep_30runs/
+outputs/controlled_adam_simplified_tuning_sweep_30runs/
+```
+
+The refined sweep command was:
+
+```bash
+cd controlled_adam_project
+MPLCONFIGDIR=/private/tmp PYTHONPATH=src python examples/run_controlled_adam_refined_tuning_sweep.py \
+  --output-dir /Users/honghaoyu/adaptive_stepsize_control/outputs/controlled_adam_refined_tuning_sweep_30runs \
+  --random-starts-per-objective 25 \
+  --random-seed 20260527
+```
+
+It produced `33,210` per-start rows, exactly:
+
+```text
+9 objectives x 123 variants x 30 starts
+```
+
+Every objective/variant group has 30 starts. The main summary is:
+
+```text
+outputs/controlled_adam_refined_tuning_sweep_30runs/CONTROLLED_ADAM_REFINED_TUNING_SWEEP.md
+```
+
+Refined tuning result:
+
+| Family | Current Avg Success | Best Tuned Avg Success | Best Tuned Setting |
+|---|---:|---:|---|
+| Raw-rho controlled Adam | `0.370` | `0.437` | `rho_star - 0.2`, `kp x2`, `alpha_min=1e-5` |
+| EMA-rho controlled Adam | `0.359` | `0.444` | `rho_star - 0.2`, `kp x2`, `alpha_min=1e-5` |
+| EMA+trust controlled Adam | `0.359` | `0.489` | `rho_beta=0.95`, `rho>=0.70`, `alpha<=1e-2`, expand `x2`, `alpha_min=1e-5` |
+
+The same tuned variants also improved the mean log10 median-best residual:
+
+| Family | Current Mean Log10 Best Residual | Tuned Mean Log10 Best Residual |
+|---|---:|---:|
+| Raw-rho | `-1.838` | `-2.636` |
+| EMA-rho | `-2.025` | `-2.587` |
+| EMA+trust | `-2.023` | `-3.018` |
+
+Interpretation:
+
+- The current raw-rho and EMA-rho settings often shrink alpha all the way to
+  `1e-8`. Raising `alpha_min` to about `1e-5`, increasing `kp`, and lowering
+  the rho target made the controller less prone to tiny-step collapse on this
+  deterministic suite.
+- The original EMA+trust setting did not improve over EMA because the trust
+  expansion gate was effectively too conservative. In the current reports it
+  usually recorded zero trust expansions.
+- The tuned trust family improves only when the expansion gate can actually
+  fire: the best refined setting used an alpha gate near `1e-2`, an `alpha_min`
+  of `1e-5`, and median trust expansions of about `12` across objective rows.
+- These tuned settings are function-suite evidence, not neural-network
+  defaults. Neural Adam-scale runs use very different alpha ranges, so a
+  meaningful trust test there must set `trust_region_alpha_threshold` near the
+  active alpha floor.
+- Ackley and Rastrigin remain unsolved by the controlled variants from broad
+  starts. The tuning improves local step-size behavior; it does not add global
+  basin search.
+
+## Simplified Controlled Adam Presets
+
+The refined sweep still exposed many raw hyperparameters. To test whether the
+optimizer can be made easier to tune, we added a smaller preset sweep:
+
+```text
+controlled_adam_project/examples/run_controlled_adam_simplified_tuning_sweep.py
+```
+
+Command:
+
+```bash
+cd controlled_adam_project
+MPLCONFIGDIR=/private/tmp PYTHONPATH=src:examples python examples/run_controlled_adam_simplified_tuning_sweep.py \
+  --output-dir /Users/honghaoyu/adaptive_stepsize_control/outputs/controlled_adam_simplified_tuning_sweep_30runs \
+  --random-starts-per-objective 25 \
+  --random-seed 20260527
+```
+
+This sweep tests only:
+
+- `family`: raw-rho, EMA-rho, or EMA+trust;
+- `response_preset`: conservative, balanced, or aggressive;
+- `alpha_preset`: low_floor, mid_floor, wide_cap, or high_floor.
+
+The response preset jointly sets `kp`, the rho target shift, EMA beta, and
+trust expansion aggressiveness. The alpha preset derives `alpha_min`,
+`alpha_max`, and trust alpha threshold from each objective's base `alpha0`.
+This is the intended low-dimensional optimizer interface, not another
+independent raw-parameter grid.
+
+Validation:
+
+```text
+per_start_results.csv: 10,530 rows = 9 objectives x 39 variants x 30 starts
+aggregate_results.csv: 351 aggregate rows
+variant_config.csv: 39 compact variants
+variant_expanded_by_objective.csv: absolute alpha/rho settings per objective
+all objective/variant groups: 30 starts
+```
+
+Best simplified result:
+
+| Family | Current Avg Success | Best Simplified Avg Success | Best Simplified Variant |
+|---|---:|---:|---|
+| Raw-rho | `0.370` | `0.470` | `raw_aggressive_high_floor` |
+| EMA-rho | `0.359` | `0.485` | `ema_aggressive_high_floor` |
+| EMA+trust | `0.359` | `0.504` | `trust_aggressive_high_floor` |
+
+The winning `aggressive_high_floor` preset means:
+
+```text
+kp_multiplier = 2
+rho_star_delta = -0.2
+rho_beta = 0.90
+trust_region_rho_threshold = 0.60
+trust_region_expand_factor = 3
+alpha_min = 0.01 * alpha0
+alpha_max = 50 * alpha0
+trust_region_alpha_threshold = 3 * alpha0
+```
+
+This simplified preset sweep recovered the main refined-grid lesson and even
+slightly exceeded the best refined raw-parameter results on this deterministic
+suite. The gain is not from a single magic constant: it comes from a coherent
+preset that raises the alpha floor, widens the cap, lowers the target rho, and
+makes trust expansion reachable.
+
+Important interpretation:
+
+- This is encouraging for usability because the user-facing choice can be
+  reduced to `family`, `response_preset`, and `alpha_preset`.
+- The best preset is aggressive on these deterministic functions. That does
+  not automatically mean it is the right neural-network default.
+- A practical neural interface should derive alpha bounds and trust thresholds
+  from the base learning rate, then validate conservative/balanced/aggressive
+  presets on Fashion-MNIST or CIFAR before changing defaults.
+
+## Tuned No-Momentum Function Benchmark
+
+After selecting the simplified `aggressive_high_floor` preset, we regenerated
+the full deterministic function benchmark with the tuned controlled Adam
+parameters and omitted SGD with momentum from the comparison. The runner is:
+
+```text
+controlled_adam_project/examples/run_function_benchmark_tuned_simplified_report.py
+```
+
+Command:
+
+```bash
+cd controlled_adam_project
+MPLCONFIGDIR=/private/tmp PYTHONPATH=src:examples python examples/run_function_benchmark_tuned_simplified_report.py \
+  --output-dir /Users/honghaoyu/adaptive_stepsize_control/outputs/function_benchmark_30runs_controlled_adam_tuned_no_momentum \
+  --random-starts-per-objective 25 \
+  --random-seed 20260527
+```
+
+This run compares only:
+
+```text
+gradient_descent
+vanilla_adam
+controlled_raw_rho      # tuned aggressive_high_floor
+controlled_ema_rho      # tuned aggressive_high_floor
+controlled_ema_trust    # tuned aggressive_high_floor
+```
+
+Validation:
+
+```text
+per_start_results.csv: 1,350 rows = 9 objectives x 5 optimizers x 30 starts
+aggregate_results.csv: 45 aggregate rows
+momentum_gradient_descent is absent from the optimizer set
+```
+
+Output report:
+
+```text
+outputs/function_benchmark_30runs_controlled_adam_tuned_no_momentum/FUNCTION_OPTIMIZATION_TUNED_BENCHMARK_REPORT.md
+```
+
+Headline averages:
+
+| Optimizer | Avg Success | Mean Log10 Median Best Residual |
+|---|---:|---:|
+| Gradient descent | `0.278` | `-2.354` |
+| Vanilla Adam | `0.307` | `-2.215` |
+| Tuned controlled raw-rho | `0.470` | `-3.384` |
+| Tuned controlled EMA-rho | `0.485` | `-3.246` |
+| Tuned controlled EMA+trust | `0.504` | `-3.499` |
+
+Winner counts across nine objectives:
+
+| Criterion | Gradient descent | Vanilla Adam | Tuned raw-rho | Tuned EMA-rho | Tuned EMA+trust |
+|---|---:|---:|---:|---:|---:|
+| Highest success rate | `4` | `5` | `7` | `7` | `9` |
+| Lowest median final residual | `5` | `5` | `1` | `3` | `7` |
+| Lowest median best residual | `5` | `5` | `1` | `3` | `7` |
+
+Interpretation: tuned EMA+trust is now the strongest controlled variant in the
+function benchmark and trust expansion is active, with median trust expansions
+around `16` across objective rows. The main wins over vanilla Adam are Beale,
+Quadratic, Rosenbrock, and faster success on several already-solvable functions.
+Ackley and Rastrigin remain basin-selection limitation cases.
+
+### Gradient-Descent Learning-Rate Sensitivity
+
+The original tuned no-momentum benchmark used the same function-level `alpha0`
+for fixed gradient descent that Adam used as its global base learning rate. That
+is intentionally simple, but it is not always a fair raw-gradient baseline.
+Goldstein-Price exposed the issue most clearly: with `alpha = alpha0 = 0.003`,
+plain gradient descent often takes a huge first raw-gradient step and leaves the
+useful basin. In the original run, `best_iteration = 0` for `29/30`
+Goldstein-Price GD starts.
+
+To make this testable without changing Adam or controlled Adam, the tuned
+runner now accepts:
+
+```bash
+--gradient-descent-alpha-multiplier VALUE
+```
+
+This multiplier applies only to the fixed GD baseline:
+
+```text
+gradient_descent alpha = VALUE * alpha0
+vanilla_adam and controlled Adam alpha0 = unchanged
+```
+
+We ran a GD-only sweep and then regenerated full reports for two smaller GD
+learning rates:
+
+```text
+outputs/function_benchmark_30runs_controlled_adam_tuned_no_momentum_gd_lr0p03/
+outputs/function_benchmark_30runs_controlled_adam_tuned_no_momentum_gd_lr0p05/
+```
+
+Both full reruns validate to `1,350` per-start rows and `45` aggregate rows.
+The non-GD aggregate metrics are identical to the original tuned no-momentum
+run; only `gradient_descent` changes.
+
+GD-only comparison:
+
+| GD alpha | Avg Success | Mean Log10 Median Best Residual | Goldstein Success | Goldstein Median Best Residual | Goldstein Median Final Residual |
+|---|---:|---:|---:|---:|---:|
+| `1.0 * alpha0` | `0.278` | `-2.354` | `0.033` | `1512.07` | `2.64e20` |
+| `0.03 * alpha0` | `0.167` | `-0.255` | `0.367` | `27.0` | `27.0` |
+| `0.05 * alpha0` | `0.174` | `-0.784` | `0.167` | `1072.09` | `6.88e14` |
+
+Interpretation:
+
+- `0.03 * alpha0` is the most Goldstein-stable GD baseline tested so far.
+- `0.05 * alpha0` is slightly better overall than `0.03 * alpha0`, but already
+  starts to reintroduce Goldstein-Price instability.
+- The original `1.0 * alpha0` remains better for some functions where GD was
+  not unstable, especially sharp/easy cases such as Easom, but it is a poor
+  Goldstein-Price raw-gradient setting.
+- Because fixed GD has no adaptive preconditioner, one global multiplier is a
+  tradeoff rather than a universally better setting.
 
 ## Longer And Aggregated Manager Runs
 

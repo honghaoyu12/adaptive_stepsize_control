@@ -43,6 +43,7 @@ class TorchControlledAdam:
         betas: tuple[float, float] = (0.9, 0.999),
         eps: float = 1e-8,
         kp: float = 0.05,
+        kp_down: float | None = None,
         rho_star: float = 0.5,
         rho_min: float = 0.0,
         alpha_min: float = 1e-8,
@@ -69,6 +70,8 @@ class TorchControlledAdam:
             raise ValueError("eps and ratio_eps must be positive.")
         if kp < 0:
             raise ValueError("kp must be non-negative.")
+        if kp_down is not None and kp_down < 0:
+            raise ValueError("kp_down must be non-negative when provided.")
         if not (0.0 < alpha_min <= alpha_max):
             raise ValueError("alpha bounds must satisfy 0 < alpha_min <= alpha_max.")
         if not (0.0 < non_descent_shrink < 1.0):
@@ -98,6 +101,7 @@ class TorchControlledAdam:
         self.beta1, self.beta2 = betas
         self.eps = eps
         self.kp = kp
+        self.kp_down = kp if kp_down is None else kp_down
         self.rho_star = rho_star
         self.rho_min = rho_min
         self.alpha_min = alpha_min
@@ -287,7 +291,9 @@ class TorchControlledAdam:
         rho_control: float,
         backtracks: int,
     ) -> tuple[float, float, bool]:
-        raw_factor = float(np.exp(self.kp * (rho_control - self.rho_star)))
+        error = rho_control - self.rho_star
+        gain = self.kp if error >= 0.0 else self.kp_down
+        raw_factor = float(np.exp(gain * error))
         factor = float(np.clip(raw_factor, self.min_alpha_factor, self.max_alpha_factor))
         trust_region_expanded = (
             self.trust_region_expand

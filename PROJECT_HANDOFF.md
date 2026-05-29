@@ -1,6 +1,6 @@
 # Project Handoff: Adaptive Step-Size Control
 
-Last updated: 2026-05-26
+Last updated: 2026-05-29
 
 This document is for a future coding agent taking over the workspace. It is intentionally comprehensive and operational: it explains what the project is, what has been implemented, how to run it, what benchmark results are already known, and what caveats matter.
 
@@ -12,6 +12,45 @@ Related project-memory documents:
   function benchmark suite and manager-report guide.
 - `OPTIMIZER_VARIANTS_BENCHMARK_REPORT.md`: comprehensive five-variant optimizer comparison and benchmark interpretation.
 - `PROJECT_HANDOFF.md`: current-state operating manual.
+
+Recommended reading order for a new coding agent:
+
+1. Read this file first for current state, known caveats, commands, and next steps.
+2. Read the root `README.md` for the public-facing project overview.
+3. Read the subproject README for the code area being changed.
+4. Use `DEVELOPMENT_LOG.md` when you need chronology, exact benchmark context,
+   or previously run commands.
+5. Use `CONVERSATION_LOG.md` only when the rationale behind a decision is still
+   unclear after reading the handoff and development log.
+
+Before making changes, run `git status --short` and preserve untracked generated
+or user-provided artifacts. At this handoff, the expected untracked files are
+listed in the Current Git State section below.
+
+Supporting documents and how to treat them:
+
+- `RAW_RHO_CONTROLLED_OPTIMIZER_ALGORITHM.md`: algorithm note for raw-rho,
+  EMA-rho, and EMA+trust controller mechanics.
+- `controlled_adam_project/CONTROLLED_ADAM_ALGORITHM.md`: paper-style
+  description of the currently implemented minibatch controlled Adam algorithm,
+  including same-minibatch trial evaluation, backtracking, rho EMA,
+  trust-region expansion, and optional asymmetric `kp_down`.
+- `NEXT_BENCHMARK_PLAN.md`: current neural-network benchmark planning note.
+- `OPTIMIZER_IMPLEMENTATION_AUDIT.md`: implementation audit for AdamW/Muon
+  alignment and intentional differences.
+- `CONTROLLED_OPTIMIZER_PERFORMANCE_AND_OVERHEAD.md`: overhead and wall-clock
+  interpretation note. Muon neural results inside it are historical unless they
+  explicitly mention the official-style Muon grouping fix.
+- `controlled_optimizer_viability_analysis.md`: viability analysis built from
+  earlier overhead evidence. Treat Muon neural numbers there as historical for
+  current baseline-quality claims.
+- `pi_adam_optimizer/PI_ADAM_DESIGN_AND_COMPARISON.md` and
+  `pi_muon_optimizer/PI_MUON_DESIGN_AND_COMPARISON.md`: standalone PI optimizer
+  design notes.
+- `delayed_feedback_adam/docs/method_note.md` and
+  `delayed_feedback_muon/docs/method_note.md`: low-overhead delayed-feedback
+  controller notes. These explain the tradeoff between avoiding the extra
+  same-minibatch forward pass and accepting one-step-delayed, noisier feedback.
 
 ## High-Level Goal
 
@@ -54,7 +93,7 @@ Using a different minibatch would confuse minibatch noise with true optimization
 
 ## Repository Layout
 
-The workspace contains five related project areas:
+The workspace contains seven related project areas:
 
 ```text
 adaptive_stepsize_control/
@@ -63,6 +102,8 @@ adaptive_stepsize_control/
 ├── controlled_muon_project/             # Muon direction + outer controller
 ├── pi_adam_optimizer/                   # standalone PI-controlled Adam
 ├── pi_muon_optimizer/                   # standalone PI-controlled Muon
+├── delayed_feedback_adam/               # delayed-feedback Adam wrapper
+├── delayed_feedback_muon/               # delayed-feedback Muon/AdamW wrapper
 ├── examples/                            # root project examples
 ├── tests/                               # root project tests
 ├── fashion/                             # local Fashion-MNIST IDX gzip files
@@ -73,15 +114,16 @@ adaptive_stepsize_control/
 ```
 
 The root, controlled Adam, and controlled Muon projects use a `src/` layout.
-The PI optimizer folders are standalone module/demo folders. Either install the
-`src/` projects editable with `pip install -e .`, or run with `PYTHONPATH=src`
-where needed.
+The PI optimizer and delayed-feedback folders are standalone module/demo
+folders. Either install the `src/` projects editable with `pip install -e .`,
+or run with `PYTHONPATH=src` where needed. For standalone folders, run tests
+from inside the folder with `PYTHONPATH=.`, because running from the monorepo
+root can shadow the inner package with the outer directory name.
 
 Generated outputs and local datasets are intentionally ignored by git.
 
 Output cleanup note: existing experiment results were moved out of the active
-top-level output locations on 2026-05-26. The current active output directories
-contain only `.gitkeep` and the backup folder:
+top-level output locations on 2026-05-26. The archived experiment folders are:
 
 ```text
 outputs/backup_20260526_182414/
@@ -91,27 +133,151 @@ controlled_muon_project/outputs/backup_20260526_182414/
 
 New experiments should write directly under `outputs/`,
 `controlled_adam_project/outputs/`, or `controlled_muon_project/outputs/` with
-fresh descriptive folder names. Treat the backup folders as archival.
+fresh descriptive folder names. Treat the backup folders as archival. Some
+local smoke/validation outputs, such as PCA trajectory checks, may also appear
+under ignored output directories and can be regenerated.
+
+## Moving This Workspace To A More Powerful Computer
+
+Important: a plain `git clone` is not enough unless the current dirty worktree
+is committed first. As of 2026-05-29, several important code/documentation
+changes and whole subprojects are still uncommitted or untracked. If the user
+wants the stronger machine to continue exactly from this state, either commit
+the work first or copy the entire working tree, including untracked files,
+ignored outputs, and local datasets.
+
+Minimum transfer checklist:
+
+```text
+tracked git files
+uncommitted modified files
+untracked subprojects: delayed_feedback_adam/, delayed_feedback_muon/
+untracked controlled Adam sweep/report scripts
+root outputs/ with recent CIFAR and function benchmark reports
+controlled_adam_project/data/ with CIFAR-10 and MNIST/Fashion-MNIST caches
+fashion/ and mnist/ local IDX gzip folders, if present
+controlled_adam_project/outputs/ and controlled_muon_project/outputs/, if historical plots/checkpoints matter
+root PDF/PNG/CSV artifacts the user may care about
+```
+
+Suggested transfer style from the old machine:
+
+```bash
+rsync -a \
+  --exclude '.venv' \
+  --exclude '__pycache__' \
+  --exclude '.pytest_cache' \
+  /Users/honghaoyu/adaptive_stepsize_control/ \
+  USER@NEW_HOST:/path/to/adaptive_stepsize_control/
+```
+
+If using git instead of `rsync`, first commit or otherwise package the current
+dirty worktree. Then separately copy ignored data/output directories, because
+they are intentionally not tracked by git.
+
+Recommended Python setup on the new machine:
+
+```bash
+cd /path/to/adaptive_stepsize_control
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+
+python -m pip install -r requirements.txt
+python -m pip install -r controlled_adam_project/requirements.txt
+python -m pip install -r controlled_muon_project/requirements.txt
+python -m pip install -r delayed_feedback_adam/requirements.txt
+python -m pip install -r delayed_feedback_muon/requirements.txt
+python -m pip install -r pi_adam_optimizer/requirements.txt
+python -m pip install -r pi_muon_optimizer/requirements.txt
+```
+
+On a CUDA machine, install the appropriate PyTorch/torchvision wheels for that
+machine first, then install the remaining requirements. Do not assume the Mac
+CPU environment here matches the stronger machine.
+
+Many historical commands used `MPLCONFIGDIR=/private/tmp` because this machine
+is macOS. On Linux, use any writable temp directory instead, for example
+`MPLCONFIGDIR=/tmp`.
+
+Useful post-transfer checks:
+
+```bash
+git status --short
+find outputs -maxdepth 1 -type d | sort
+test -d controlled_adam_project/data/cifar-10-batches-py && echo "CIFAR present"
+```
+
+If CIFAR-10 is missing, most CIFAR runners can recreate it with `--download`.
+For offline use, copy `controlled_adam_project/data/cifar-10-batches-py/`.
+
+Recent ignored output folders that matter for the latest Adam discussion:
+
+```text
+outputs/cifar10_resnet_adam_delayed_10k_2k_20epoch_seed123_raw_ema/
+outputs/cifar10_resnet_adam_backtracking_sweep_highlr2e3_cap2p5e3_seed123/
+outputs/cifar10_resnet_adam_cap_sweep_lr1e3_seed123/
+outputs/cifar10_resnet_adam_rhostar_asym_gain_seed123/
+outputs/controlled_adam_simplified_tuning_sweep_30runs/
+```
+
+Each of those folders contains its own report and CSV/plot artifacts. Copy them
+if the new agent should analyze existing results instead of rerunning.
 
 ## Current Git State
 
 The latest project update was committed locally in:
 
 ```text
+12a12df Add PCA trajectory visualization for Adam checkpoints
+```
+
+Recent commits before it include:
+
+```text
+87af501 Refresh project documentation state
 9c55036 Add PI optimizers and align Muon implementation
 ```
 
-That commit added the PI Adam and PI Muon subprojects, aligned the neural Muon
-implementations with official `torch.optim.Muon` behavior, updated the audit
-and project-memory documents, and archived older experimental outputs. At the
-time of this handoff, the only expected untracked files are generated artifacts
-kept out of git by design:
+Together these commits added the PI Adam and PI Muon subprojects, aligned the
+neural Muon implementations with official `torch.optim.Muon` behavior, updated
+the audit and project-memory documents, archived older experimental outputs,
+and added the Adam checkpoint PCA trajectory post-processor.
+
+At the time of this handoff, the workspace is not clean. Preserve these local
+changes and generated artifacts unless the user explicitly asks to remove or
+commit them. Important uncommitted changes include:
 
 ```text
+README.md
+PROJECT_HANDOFF.md
+DEVELOPMENT_LOG.md
+CONVERSATION_LOG.md
+controlled_adam_project/CONTROLLED_ADAM_ALGORITHM.md
+controlled_adam_project/README.md
+controlled_adam_project/src/controlled_adam/torch_optimizers.py
+controlled_adam_project/src/controlled_adam/optimizers.py
+controlled_adam_project/examples/run_mnist_demo.py
+delayed_feedback_adam/examples/run_cifar_resnet_adam_comparison.py
+delayed_feedback_adam/
+delayed_feedback_muon/
+controlled_adam_project/examples/run_controlled_adam_*_sweep.py
+controlled_adam_project/examples/run_function_benchmark_tuned_simplified_report.py
 fashionmnist_20epoch_metrics.png
 fashionmnist_20epoch_metrics.summary.csv
 scheduled_iterate_muon_academic_report.pdf
 ```
+
+There are also unrelated or earlier modified files in the current worktree,
+including `FUNCTION_OPTIMIZATION_BENCHMARK_SUITE.md`,
+`controlled_adam_project/examples/run_function_benchmark_report.py`, and
+`controlled_muon_project/examples/run_function_benchmark_report.py`. Do not
+revert them casually; treat them as user/local work unless the user explicitly
+asks for cleanup.
+
+The root `outputs/` directory also contains ignored benchmark outputs,
+including the latest controlled-vs-delayed Adam CIFAR-10 ResNet run described
+below. These outputs are useful for analysis but are not tracked by git.
 
 Historical CIFAR-10 Adam tuning sweeps recorded in this handoff:
 
@@ -264,10 +430,120 @@ Interpretation:
   `controlled_ema`) or move to a larger train/test subset for the same balanced
   setting.
 
-There are also two user-provided/untracked comparison files at repo root:
+Controlled-vs-delayed Adam ResNet follow-up:
+
+- Added and used
+  `delayed_feedback_adam/examples/run_cifar_resnet_adam_comparison.py`.
+- Purpose: compare same-step controlled Adam and delayed-feedback Adam in one
+  CIFAR-10 ResNet runner, with both raw-rho and EMA-style variants present.
+- Run setup: CIFAR-10 `resnet_cifar`, 10k train / 2k test, 20 epochs, batch
+  size `128`, seed `123`, base LR `1e-3`, checkpoints every 5 epochs.
+- Output directory:
+  `outputs/cifar10_resnet_adam_delayed_10k_2k_20epoch_seed123_raw_ema/`.
+- The output directory contains `REPORT.md`, `cifar10_epoch_metrics.csv`,
+  step diagnostics for each controlled/delayed variant, accuracy/loss plots,
+  alpha/rho plots, and checkpoints.
+- Final metrics:
+
+```text
+optimizer                 test_acc  test_loss  train_loss  final_mean_lr  final_mean_rho
+vanilla_adam              0.6915    0.9454     0.7499      n/a            n/a
+controlled_raw_rho        0.7395    0.7715     0.5830      1.500e-3      0.882
+controlled_ema            0.7135    0.8488     0.6656      1.500e-3      0.877
+controlled_ema_trust      0.7135    0.8488     0.6656      1.500e-3      0.877
+delayed_raw               0.6825    0.9768     0.7820      7.528e-4      0.177
+delayed_ema               0.6960    0.9009     0.7334      7.500e-4      0.151
+delayed_safe              0.6985    0.9156     0.7194      8.000e-4      0.170
+delayed_ema_floor90       0.6950    0.8840     0.6783      9.000e-4      0.133
+```
+
+- Best delayed final accuracy was `delayed_safe` at `0.6985`, only slightly
+  above vanilla Adam and below both same-step controlled Adam variants.
+- `delayed_raw` had best delayed peak accuracy `0.6975` at epoch 19, but lower
+  final accuracy `0.6825`.
+- Same-step controlled variants accepted every step and did no backtracking.
+  Raw-rho and EMA both reached `alpha_max=1.5e-3`.
+- `controlled_ema_trust` had zero trust expansions, so it exactly matched
+  `controlled_ema`.
+- Delayed variants applied their controller on `1579/1580` steps; the first
+  step has no previous feedback. All delayed variants were floor-bound for most
+  of training.
+- Important interpretation: delayed rho is not on the same numerical scale as
+  same-step rho in ordinary minibatch CIFAR. Same-step final mean rho was about
+  `0.88`, while delayed final mean rho was about `0.13-0.18`. Reusing
+  same-step targets such as `rho_star=0.7-0.8` makes the delayed controller
+  think steps are poor and shrink alpha. Future delayed tuning should target
+  the observed delayed rho scale, for example testing lower `rho_star` values
+  around `0.15-0.30`, plus floor/cap sweeps around Adam scale.
+- Important fixed-LR discussion: if higher fixed-LR Adam works, that does not
+  make controlled Adam bad. It identifies a confound. We need fixed Adam at
+  multiple learning rates and simple warmup schedules to separate:
+  1. "Adam just wanted a larger LR";
+  2. "the controlled ramp behaves like a useful schedule";
+  3. "the rho controller is genuinely selecting useful step sizes."
+  A strong controller should be less sensitive to the exact upper bound than
+  vanilla Adam is to its fixed LR, and should avoid destructive use of an overly
+  broad bound.
+
+Latest same-step controlled Adam ResNet controller diagnostics:
+
+- The exact "ResNet" in these benchmarks is `SmallCIFARResNet`, not
+  torchvision ResNet-18. It is defined in
+  `controlled_adam_project/examples/run_mnist_demo.py`: `3x3` stride-1 CIFAR
+  stem, stages of width `16`, `32`, and `64`, two `BasicBlock`s per stage,
+  adaptive average pooling, and a `64 -> 10` linear head. Each block is
+  `Conv3x3 -> BatchNorm -> ReLU -> Conv3x3 -> BatchNorm` plus identity or
+  projection skip. Parameter count: `175258`.
+- The full current controlled Adam algorithm is now documented in
+  `controlled_adam_project/CONTROLLED_ADAM_ALGORITHM.md`. That note matches
+  the PyTorch implementation, including the detail that if every trial step is
+  rejected, parameters are restored but Adam's moment state has still consumed
+  the minibatch gradient.
+- High-LR/high-cap backtracking sweep:
+  `outputs/cifar10_resnet_adam_backtracking_sweep_highlr2e3_cap2p5e3_seed123/`.
+  Setup: 10k/2k CIFAR-10, 20 epochs, seed `123`, `lr=2e-3`,
+  `alpha_min=1e-3`, `alpha_max=2.5e-3`, `rho_star=0.80`,
+  `rho_beta=0.90`, `kp=0.02`. The large alpha cliffs in the old plot were
+  caused by backtracking, especially `backtrack_shrink=0.5`. Gentler
+  backtracking smoothed the curve but did not beat the lower-cap balanced
+  setting. Best new backtracking compromise was `backtrack_shrink=0.7`,
+  `rho_min=0.1`: raw-rho final `0.7030`, EMA final `0.7090`.
+- Clean cap sweep:
+  `outputs/cifar10_resnet_adam_cap_sweep_lr1e3_seed123/`. Setup: same
+  10k/2k ResNet benchmark, `lr=1e-3`, `alpha_min=1e-3`, `rho_star=0.80`,
+  `kp=0.02`, cap-only changes. Final test accuracy:
+
+```text
+alpha_max   controlled_raw_rho   controlled_ema
+1.50e-3     0.7395               0.7135
+1.75e-3     0.7395               0.7240
+2.00e-3     0.7290               0.7245
+2.25e-3     0.7155               0.7355
+```
+
+  Both controlled variants eventually reached every tested cap. Raw-rho was
+  best around `1.5e-3` to `1.75e-3`; EMA liked more cap on this single seed.
+  This means cap saturation is not intrinsically bad, but the current
+  same-step rho target does not discover an interior alpha optimum by itself.
+- Added optional asymmetric gain support to controlled Adam:
+  `TorchControlledAdam(..., kp_down=...)` and
+  `--controlled-kp-down` in the CIFAR comparison CLI. If omitted,
+  `kp_down=kp`, so old behavior is unchanged. The controller now uses `kp` for
+  `rho_control >= rho_star` and `kp_down` for `rho_control < rho_star`.
+- Raised-target / asymmetric-gain test:
+  `outputs/cifar10_resnet_adam_rhostar_asym_gain_seed123/`. With
+  `alpha_max=2.25e-3`, `rho_star=0.85` prevented cap saturation but was too
+  conservative: raw-rho final `0.7115`, EMA final `0.6980`. With
+  `rho_star=0.80`, `kp_down=0.08`, saturation was delayed but not removed:
+  raw-rho final `0.6950`, EMA final `0.7330`. The most sensible next setting
+  is the middle ground `rho_star=0.825`, `kp_down=0.04` or `0.06`,
+  `alpha_max=2.25e-3`.
+
+There are also user-provided/untracked comparison/report artifacts at repo root:
 
 - `fashionmnist_20epoch_metrics.summary.csv`
 - `fashionmnist_20epoch_metrics.png`
+- `scheduled_iterate_muon_academic_report.pdf`
 
 Do not delete user-added files unless explicitly asked.
 
@@ -324,6 +600,68 @@ Known result:
 
 ```text
 15 passed
+```
+
+## Delayed-Feedback Optimizer Subprojects
+
+Paths:
+
+```text
+delayed_feedback_adam/
+delayed_feedback_muon/
+```
+
+Purpose: standalone PyTorch optimizer experiments for the lower-overhead
+controller idea. Instead of evaluating `f(theta + alpha p)` immediately after
+a trial step, these optimizers use the next loss value already computed by the
+training loop to estimate the previous step's actual-versus-predicted decrease:
+
+```text
+rho_{t-1} = (loss_{t-1} - loss_t) / predicted_decrease_{t-1}
+```
+
+This avoids the extra same-minibatch forward pass used by the controlled Adam,
+controlled Muon, and PI optimizers. The tradeoff is that the feedback is delayed
+by one step, cannot reject a bad step before it happens, and is noisier under
+ordinary minibatch shuffling because consecutive losses usually come from
+different minibatches.
+
+Current implementation state:
+
+- `DelayedFeedbackAdam` wraps an Adam/AdamW-style direction with delayed P/PI/PID
+  alpha control.
+- `DelayedFeedbackMuon` wraps official-style 2D Muon directions with auxiliary
+  AdamW fallback for non-2D parameters.
+- On 2026-05-27, the delayed implementations were checked against the local
+  PyTorch `2.10.0` source. AdamW behavior matched the supported simple path.
+  Muon was aligned to `torch.optim.Muon` conventions:
+  - momentum buffer update uses `buf.lerp_(grad, 1 - momentum)`;
+  - Nesterov update uses `grad.lerp(buf, momentum)`;
+  - automatic Muon selection is 2D-only;
+  - `adjust_lr_fn=None` and `"original"` both use PyTorch's original shape
+    scaling;
+  - decoupled weight decay uses the base learning rate, not the shape-adjusted
+    Muon learning rate.
+
+Important files:
+
+- `delayed_feedback_adam/delayed_feedback_adam/optimizer.py`
+- `delayed_feedback_adam/README.md`
+- `delayed_feedback_adam/docs/method_note.md`
+- `delayed_feedback_muon/delayed_feedback_muon/optimizer.py`
+- `delayed_feedback_muon/README.md`
+- `delayed_feedback_muon/docs/method_note.md`
+
+Verification already run:
+
+```bash
+cd delayed_feedback_adam
+PYTHONPATH=. python -m pytest -q tests
+# 4 passed
+
+cd ../delayed_feedback_muon
+PYTHONPATH=. python -m pytest -q tests
+# 6 passed
 ```
 
 ## Root Project
@@ -511,6 +849,167 @@ Recent function-report follow-ups:
   - `controlled_adam_project/outputs/function_report_manager_extended_10x_30starts/`
   - `controlled_adam_project/outputs/function_report_manager_extended_10x_60starts/`
   - `controlled_adam_project/outputs/function_report_manager_extended_60starts_default_steps/`
+
+Controlled Adam tuning sweeps:
+
+- Added tuning scripts:
+  - `controlled_adam_project/examples/run_controlled_adam_parameter_sweep.py`
+  - `controlled_adam_project/examples/run_controlled_adam_tuning_sweep.py`
+  - `controlled_adam_project/examples/run_controlled_adam_refined_tuning_sweep.py`
+  - `controlled_adam_project/examples/run_controlled_adam_simplified_tuning_sweep.py`
+- Generated broad and refined 30-start outputs under the root output directory:
+  - `outputs/controlled_adam_parameter_sweep_30runs/`
+  - `outputs/controlled_adam_tuning_sweep_30runs/`
+  - `outputs/controlled_adam_refined_tuning_sweep_30runs/`
+  - `outputs/controlled_adam_simplified_tuning_sweep_30runs/`
+- The refined sweep command was:
+
+```bash
+cd controlled_adam_project
+MPLCONFIGDIR=/private/tmp PYTHONPATH=src python examples/run_controlled_adam_refined_tuning_sweep.py \
+  --output-dir /Users/honghaoyu/adaptive_stepsize_control/outputs/controlled_adam_refined_tuning_sweep_30runs \
+  --random-starts-per-objective 25 \
+  --random-seed 20260527
+```
+
+- Validation: `per_start_results.csv` has `33,210` rows, exactly
+  `9 objectives x 123 variants x 30 starts`, and every objective/variant group
+  has 30 starts.
+- Refined result summary:
+
+```text
+raw-rho current 0.370 -> tuned 0.437
+EMA-rho current 0.359 -> tuned 0.444
+EMA+trust current 0.359 -> tuned 0.489
+```
+
+- Best raw-rho setting: `rho_star - 0.2`, `kp x2`, `alpha_min=1e-5`.
+- Best EMA-rho setting: `rho_star - 0.2`, `kp x2`, `alpha_min=1e-5`.
+- Best EMA+trust setting by success/residual tie-break:
+  `rho_beta=0.95`, `rho>=0.70`, `alpha<=1e-2`, expand `x2`,
+  `alpha_min=1e-5`.
+- Interpretation: all three controlled families can improve on the
+  deterministic suite. Raw/EMA mainly benefit from avoiding collapse to
+  `alpha_min=1e-8`; tuned trust improves most because its expansion gate
+  finally fires, with median trust expansions around `12` across objective
+  rows. This is function-suite evidence, not a reason to change neural defaults
+  without an Adam-scale validation run.
+
+Simplified preset sweep:
+
+- Motivation: reduce the apparent optimizer tuning burden. Instead of exposing
+  many raw knobs, test a preset interface:
+  - `family`: raw-rho, EMA-rho, or EMA+trust;
+  - `response_preset`: conservative, balanced, or aggressive;
+  - `alpha_preset`: low_floor, mid_floor, wide_cap, or high_floor.
+- Command:
+
+```bash
+cd controlled_adam_project
+MPLCONFIGDIR=/private/tmp PYTHONPATH=src:examples python examples/run_controlled_adam_simplified_tuning_sweep.py \
+  --output-dir /Users/honghaoyu/adaptive_stepsize_control/outputs/controlled_adam_simplified_tuning_sweep_30runs \
+  --random-starts-per-objective 25 \
+  --random-seed 20260527
+```
+
+- Validation: `per_start_results.csv` has `10,530` rows, exactly
+  `9 objectives x 39 variants x 30 starts`, and every objective/variant group
+  has 30 starts.
+- Output summary:
+  `outputs/controlled_adam_simplified_tuning_sweep_30runs/CONTROLLED_ADAM_SIMPLIFIED_TUNING_SWEEP.md`.
+- Best simplified result:
+
+```text
+raw-rho current 0.370 -> simplified 0.470
+EMA-rho current 0.359 -> simplified 0.485
+EMA+trust current 0.359 -> simplified 0.504
+```
+
+- The common winning preset was `aggressive_high_floor`:
+
+```text
+kp_multiplier = 2
+rho_star_delta = -0.2
+rho_beta = 0.90
+trust_region_rho_threshold = 0.60
+trust_region_expand_factor = 3
+alpha_min = 0.01 * alpha0
+alpha_max = 50 * alpha0
+trust_region_alpha_threshold = 3 * alpha0
+```
+
+- Interpretation: the simplified preset recovered and slightly exceeded the
+  earlier refined-grid results on deterministic functions, while reducing the
+  user-facing interface to three choices. The improvement is a coupled preset
+  effect: higher floor, wider cap, lower rho target, stronger gain, and
+  reachable trust expansion. Validate on neural tasks before making it a
+  default.
+
+Tuned no-momentum function benchmark:
+
+- Added `controlled_adam_project/examples/run_function_benchmark_tuned_simplified_report.py`.
+- This reruns the deterministic function benchmark with the
+  `aggressive_high_floor` controlled parameters and omits SGD with momentum.
+- Output:
+  `outputs/function_benchmark_30runs_controlled_adam_tuned_no_momentum/`.
+- Validation: `per_start_results.csv` has `1,350` rows, exactly
+  `9 objectives x 5 optimizers x 30 starts`. The optimizer set is
+  `gradient_descent`, `vanilla_adam`, `controlled_raw_rho`,
+  `controlled_ema_rho`, and `controlled_ema_trust`.
+- Headline averages:
+
+```text
+gradient_descent        success 0.278  mean log10 best residual -2.354
+vanilla_adam            success 0.307  mean log10 best residual -2.215
+tuned raw-rho           success 0.470  mean log10 best residual -3.384
+tuned EMA-rho           success 0.485  mean log10 best residual -3.246
+tuned EMA+trust         success 0.504  mean log10 best residual -3.499
+```
+
+- Interpretation: tuned EMA+trust is strongest in this no-momentum function
+  report, and trust expansion is active with median trust expansions around
+  `16` across objective rows. The tuned controlled variants most clearly beat
+  vanilla Adam on Beale, Quadratic, and Rosenbrock. Ackley and Rastrigin remain
+  basin-selection limitation cases.
+
+### GD Baseline Learning-Rate Sensitivity
+
+- Goldstein-Price exposed that the original fixed GD baseline was using an
+  Adam-scale learning rate as a raw-gradient learning rate. With
+  `alpha = alpha0 = 0.003`, the first Goldstein-Price GD step is often enormous,
+  so `best_iteration = 0` for `29/30` starts in the original tuned report.
+- `controlled_adam_project/examples/run_function_benchmark_tuned_simplified_report.py`
+  now accepts:
+
+```bash
+--gradient-descent-alpha-multiplier VALUE
+```
+
+- The multiplier applies only to `gradient_descent`; vanilla Adam and all
+  controlled Adam variants still use the original `alpha0`.
+- New full reports:
+
+```text
+outputs/function_benchmark_30runs_controlled_adam_tuned_no_momentum_gd_lr0p03/
+outputs/function_benchmark_30runs_controlled_adam_tuned_no_momentum_gd_lr0p05/
+```
+
+- Both have `1,350` per-start rows and `45` aggregate rows. Non-GD aggregate
+  metrics are unchanged from the original tuned no-momentum report.
+- GD comparison:
+
+```text
+GD alpha       avg success  mean log10 best  Goldstein success  Goldstein best  Goldstein final
+1.0 * alpha0   0.278        -2.354           0.033              1512.07         2.64e20
+0.03 * alpha0  0.167        -0.255           0.367              27.0            27.0
+0.05 * alpha0  0.174        -0.784           0.167              1072.09         6.88e14
+```
+
+- Practical interpretation: use `0.03 * alpha0` when you want a
+  Goldstein-stable fixed-GD reference. Use `0.05 * alpha0` only as a larger-LR
+  stress point. The original `1.0 * alpha0` remains a useful reminder that one
+  fixed raw-gradient LR can look good on some functions and fail badly on
+  others.
 
 Interpretation for manager-facing function optimization:
 
@@ -1116,43 +1615,116 @@ On another machine, either copy this folder or run the Adam/Muon runner with `--
    If a future machine needs benchmark outputs, copy them explicitly or rerun commands.
 
 5. There may be unrelated local/user files.
-   Do not delete root `fashionmnist_20epoch_metrics.*` files or dataset folders unless the user explicitly asks.
+   Do not delete root `fashionmnist_20epoch_metrics.*`,
+   `scheduled_iterate_muon_academic_report.pdf`, or dataset folders unless the
+   user explicitly asks.
 
 6. Current benchmark subset results are deterministic but subset-limited.
-   Accuracy numbers are for 4096/1024 Fashion-MNIST and 5000/1000 CIFAR-10 unless stated otherwise. The larger Adam CIFAR run uses 20000/5000. These are not full-dataset claims.
+   Accuracy numbers are for 4096/1024 Fashion-MNIST, 5000/1000 CIFAR-10,
+   10000/2000 CIFAR-10 ResNet, or 20000/5000 larger CIFAR-10 runs as stated
+   in each section. These are not full-dataset claims unless explicitly
+   labeled as full-dataset runs.
 
 7. The Adam and Muon projects have similar but not identical control behavior.
    Adam needs a tight alpha cap around Adam scale for CIFAR; Muon naturally grew to much larger alpha values and still improved over fixed Muon in the subset runs.
 
+8. Delayed-feedback optimizers are not same-step controllers.
+   They avoid the extra forward pass by using the next naturally computed loss
+   as feedback for the previous step. This is lower overhead, but it is not a
+   line-search/trust-region replacement, cannot undo the previous step, and
+   mixes minibatch noise into the rho estimate unless batches are repeated or
+   full-batch data is used.
+
 ## Recommended Next Steps For The Next Agent
 
-1. Consider extending the PCA trajectory post-processor with optional loss
+1. Run the next compact same-step controlled Adam ResNet controller test:
+   `rho_star=0.825`, `kp=0.02`, `kp_down=0.04` and/or `0.06`,
+   `alpha_max=2.25e-3`, variants `controlled_raw_rho` and `controlled_ema`,
+   on the same 10k/2k, 20-epoch, seed-123 CIFAR ResNet setup. This tests the
+   middle ground between permissive `rho_star=0.80` cap saturation and
+   over-conservative `rho_star=0.85` floor-hugging.
+
+   Example command for `kp_down=0.04`:
+
+```bash
+MPLCONFIGDIR=/tmp python3 delayed_feedback_adam/examples/run_cifar_resnet_adam_comparison.py \
+  --epochs 20 \
+  --train-subset 10000 \
+  --test-subset 2000 \
+  --batch-size 128 \
+  --lr 1e-3 \
+  --controlled-alpha-min 1e-3 \
+  --controlled-alpha-max 2.25e-3 \
+  --controlled-rho-star 0.825 \
+  --controlled-rho-beta 0.90 \
+  --controlled-kp 0.02 \
+  --controlled-kp-down 0.04 \
+  --controlled-min-alpha-factor 0.98 \
+  --controlled-max-alpha-factor 1.015 \
+  --output-dir outputs/cifar10_resnet_adam_rhostar0p825_kpdown0p04_cap2p25e3_lr1e3_10k_2k_20epoch_seed123 \
+  --print-every 1 \
+  --checkpoint-every 5 \
+  --variants controlled_raw_rho controlled_ema
+```
+
+2. Tune delayed-feedback Adam on CIFAR/Fashion-MNIST using delayed-specific rho
+   targets. The latest ResNet run showed delayed `rho_bar` near `0.13-0.24`,
+   far below the same-step target range. Start by sweeping `rho_star` around
+   `0.15-0.30`, alpha floors near `0.8-1.1x` base LR, and caps near
+   `1.25-1.75x` base LR. Compare wall-clock, alpha traces, and rho diagnostics.
+
+3. Add stronger fixed-LR and warmup baselines for controlled Adam. Include
+   vanilla Adam at `1e-3`, `1.25e-3`, `1.5e-3`, and possibly `2e-3`, plus a
+   simple warmup from `1e-3` to `1.5e-3`. This tests whether controlled Adam is
+   doing more than discovering a higher cap.
+
+4. Validate the simplified controlled-Adam preset interface on a neural task
+   before changing any default neural settings. The deterministic sweep suggests
+   the `aggressive_high_floor` preset is strong on 2D functions, but neural runs
+   operate at Adam-scale alpha ranges such as `1e-3`; alpha bounds and trust
+   thresholds must be derived from the neural base learning rate and checked on
+   Fashion-MNIST or CIFAR.
+
+5. Consider extending the PCA trajectory post-processor with optional loss
    contour evaluation on the same PCA plane. The current implementation plots
    trajectories only; contour evaluation would require rebuilding the dataset
    and running many forward passes.
 
-2. Add checkpointing and incremental epoch-metrics flushing to the Muon
+6. Add checkpointing and incremental epoch-metrics flushing to the Muon
    `run_mnist_demo.py`. Per-epoch progress printing already exists through
    `--print-every`, but long jobs would still benefit from partial CSV output
    and resumable checkpoints.
 
-3. Add automatic best-epoch summary CSV/JSON so users do not need ad hoc parsing.
+7. Add automatic best-epoch summary CSV/JSON so users do not need ad hoc parsing.
 
-4. Consider a faster torch-native Muon implementation:
+8. Consider a faster torch-native Muon implementation:
    - avoid NumPy round-trips where possible
    - use batched or GPU-compatible orthogonalization
    - treat bias/BatchNorm parameters separately if needed
 
-5. Tune Muon controller settings separately from Adam.
+9. Tune Muon controller settings separately from Adam.
    The default `alpha_max=0.05` worked surprisingly well on Muon CIFAR subset runs, but should be stress-tested.
 
-6. Run full-dataset benchmarks only after checkpointing or incremental metrics
+10. Run full-dataset benchmarks only after checkpointing or incremental metrics
    writing is added.
 
-7. Consider early stopping or best-checkpoint reporting.
+11. Consider early stopping or best-checkpoint reporting.
    In long runs, peak accuracy can occur before the final epoch.
 
 ## Quick Verification Commands
+
+After moving to a new machine and activating the Python environment, first
+confirm the important packages and data path:
+
+```bash
+python - <<'PY'
+import torch
+print("torch", torch.__version__)
+print("cuda available", torch.cuda.is_available())
+PY
+
+test -d controlled_adam_project/data/cifar-10-batches-py && echo "CIFAR present"
+```
 
 Root project:
 
@@ -1180,6 +1752,43 @@ Latest known Muon test result:
 12 passed
 ```
 
+Delayed-feedback standalone optimizers:
+
+```bash
+cd delayed_feedback_adam
+PYTHONPATH=. python -m pytest -q tests
+
+cd ../delayed_feedback_muon
+PYTHONPATH=. python -m pytest -q tests
+```
+
+Latest known delayed-feedback test results:
+
+```text
+delayed_feedback_adam: 4 passed
+delayed_feedback_muon: 6 passed
+```
+
+PI optimizer smoke tests:
+
+```bash
+cd pi_adam_optimizer
+python test_pi_adam.py
+
+cd ../pi_muon_optimizer
+python test_pi_muon.py
+```
+
+Controlled Adam syntax check after the recent `kp_down` addition:
+
+```bash
+python3 -m py_compile \
+  controlled_adam_project/src/controlled_adam/torch_optimizers.py \
+  controlled_adam_project/src/controlled_adam/optimizers.py \
+  controlled_adam_project/examples/run_mnist_demo.py \
+  delayed_feedback_adam/examples/run_cifar_resnet_adam_comparison.py
+```
+
 ## Important Philosophy For Future Changes
 
 The purpose is not simply to beat Adam or Muon in every setting. The purpose is to understand whether an objective-feedback controller can safely and usefully adapt the global multiplier on top of a strong optimizer direction.
@@ -1193,3 +1802,8 @@ When adding experiments, preserve these comparisons:
 - EMA plus trust/recovery controller
 
 This separation is what lets the user distinguish direction quality from controller quality.
+
+Also preserve fixed-LR and simple-schedule baselines. They are not arguments
+against controlled optimization; they are the controls needed to determine
+whether an observed win comes from adaptive rho feedback, a larger effective
+learning rate, or a warmup-like trajectory to the cap.

@@ -1,9 +1,12 @@
 """Generate a self-contained deterministic function-optimization report.
 
 This script is intentionally independent of the neural-network benchmarks. It
-compares vanilla Adam with three controlled Adam variants on the 2D objective
-functions already implemented in the project:
+compares gradient-descent baselines, vanilla Adam, and three controlled Adam
+variants on the 2D objective functions already implemented in the project:
 
+- vanilla gradient descent uses the raw gradient with a fixed learning rate;
+- momentum gradient descent uses the same learning rate with classical
+  velocity momentum;
 - raw-rho controlled Adam updates alpha directly from rho_t;
 - EMA-rho controlled Adam updates alpha from an exponential moving average of
   rho_t.
@@ -46,6 +49,8 @@ from controlled_adam.optimizers import OptimizationHistory, controlled_adam, van
 
 
 OPTIMIZER_LABELS = {
+    "gradient_descent": "Gradient descent",
+    "momentum_gradient_descent": "Gradient descent + momentum",
     "vanilla_adam": "Vanilla Adam",
     "controlled_raw_rho": "Controlled Adam (raw rho)",
     "controlled_ema_rho": "Controlled Adam (EMA rho)",
@@ -53,6 +58,8 @@ OPTIMIZER_LABELS = {
 }
 
 OPTIMIZER_LABELS_ZH = {
+    "gradient_descent": "梯度下降",
+    "momentum_gradient_descent": "动量梯度下降",
     "vanilla_adam": "标准 Adam",
     "controlled_raw_rho": "受控 Adam（原始 rho）",
     "controlled_ema_rho": "受控 Adam（EMA 平滑 rho）",
@@ -60,6 +67,8 @@ OPTIMIZER_LABELS_ZH = {
 }
 
 OPTIMIZER_COLORS = {
+    "gradient_descent": "#6f42c1",
+    "momentum_gradient_descent": "#8c564b",
     "vanilla_adam": "#e07a24",
     "controlled_raw_rho": "#c92a2a",
     "controlled_ema_rho": "#2f6fbb",
@@ -205,6 +214,104 @@ class RunSummary:
     final_rho: float
     median_rho: float
     trust_expansions: int
+
+
+def run_gradient_descent(
+    objective: Objective,
+    x0: np.ndarray,
+    alpha: float,
+    steps: int,
+    divergence_norm: float = 1e8,
+) -> OptimizationHistory:
+    """Run fixed-step gradient descent on a deterministic objective."""
+
+    return run_gradient_baseline(
+        objective=objective,
+        x0=x0,
+        alpha=alpha,
+        steps=steps,
+        momentum=0.0,
+        divergence_norm=divergence_norm,
+    )
+
+
+def run_momentum_gradient_descent(
+    objective: Objective,
+    x0: np.ndarray,
+    alpha: float,
+    steps: int,
+    momentum: float = 0.9,
+    divergence_norm: float = 1e8,
+) -> OptimizationHistory:
+    """Run fixed-step gradient descent with classical velocity momentum."""
+
+    if not (0.0 <= momentum < 1.0):
+        raise ValueError("momentum must be in [0, 1).")
+    return run_gradient_baseline(
+        objective=objective,
+        x0=x0,
+        alpha=alpha,
+        steps=steps,
+        momentum=momentum,
+        divergence_norm=divergence_norm,
+    )
+
+
+def run_gradient_baseline(
+    objective: Objective,
+    x0: np.ndarray,
+    alpha: float,
+    steps: int,
+    momentum: float,
+    divergence_norm: float,
+) -> OptimizationHistory:
+    """Shared implementation for the two fixed-learning-rate GD baselines."""
+
+    if steps <= 0:
+        raise ValueError("steps must be positive.")
+    if alpha <= 0.0:
+        raise ValueError("learning rate must be positive.")
+
+    x = np.asarray(x0, dtype=float).copy()
+    velocity = np.zeros_like(x)
+
+    xs = [x.copy()]
+    fs = [objective.value(x)]
+    alphas = []
+    grad_norms = []
+
+    for _ in range(steps):
+        g = objective.gradient(x)
+        grad_norm = float(np.linalg.norm(g))
+        if momentum == 0.0:
+            step = -alpha * g
+        else:
+            velocity = momentum * velocity - alpha * g
+            step = velocity
+
+        x_candidate = x + step
+        if (
+            not np.all(np.isfinite(x_candidate))
+            or float(np.linalg.norm(x_candidate)) > divergence_norm
+        ):
+            break
+
+        f_candidate = objective.value(x_candidate)
+        if not np.isfinite(f_candidate):
+            break
+
+        x = x_candidate
+        xs.append(x.copy())
+        fs.append(float(f_candidate))
+        alphas.append(alpha)
+        grad_norms.append(grad_norm)
+
+    return OptimizationHistory(
+        xs=np.asarray(xs),
+        fs=np.asarray(fs),
+        alphas=np.asarray(alphas),
+        grad_norms=np.asarray(grad_norms),
+    )
 
 
 def controlled_adam_ema_rho(
@@ -548,8 +655,25 @@ def iterations_to_success(
     distances = nearest_minimum_distance(objective, history.xs)
     residuals = objective_residuals(objective, history.fs)
     success_mask = (residuals <= success_tol_f) | (distances <= success_tol_dist)
+    success_mask = np.asarray(success_mask, dtype=bool) & np.isfinite(residuals)
     hits = np.flatnonzero(success_mask)
     return int(hits[0]) if len(hits) else -1
+
+
+def nan_safe_argmin(values: np.ndarray) -> int:
+    """Return argmin while treating NaNs as missing values."""
+
+    finite = np.isfinite(values)
+    if not np.any(finite):
+        return 0
+    return int(np.flatnonzero(finite)[np.argmin(values[finite])])
+
+
+def nan_safe_min(values: np.ndarray) -> float:
+    """Return the finite minimum, or NaN when no finite value exists."""
+
+    finite_values = np.asarray(values, dtype=float)[np.isfinite(values)]
+    return float(np.min(finite_values)) if len(finite_values) else float("nan")
 
 
 def summarize_run(
@@ -563,8 +687,8 @@ def summarize_run(
 
     distances = nearest_minimum_distance(case.objective, history.xs)
     residuals = objective_residuals(case.objective, history.fs)
-    best_iteration = int(np.nanargmin(residuals))
-    best_distance_iteration = int(np.nanargmin(distances))
+    best_iteration = nan_safe_argmin(residuals)
+    best_distance_iteration = nan_safe_argmin(distances)
     hit_iteration = iterations_to_success(
         history,
         case.objective,
@@ -601,9 +725,9 @@ def summarize_run(
         start_x=float(x0[0]),
         start_y=float(x0[1]),
         final_f=float(history.fs[-1]),
-        best_f=float(np.nanmin(history.fs)),
+        best_f=nan_safe_min(history.fs),
         final_residual=float(residuals[-1]),
-        best_residual=float(np.nanmin(residuals)),
+        best_residual=nan_safe_min(residuals),
         final_distance=float(distances[-1]),
         best_distance=float(distances[best_distance_iteration]),
         final_grad_norm=final_grad_norm,
@@ -626,6 +750,32 @@ def run_case(case: BenchmarkCase) -> tuple[list[RunSummary], dict[tuple[int, str
     histories: dict[tuple[int, str], OptimizationHistory] = {}
 
     for start_id, x0 in enumerate(case.starts):
+        gd = run_gradient_descent(
+            case.objective,
+            x0,
+            alpha=case.alpha,
+            steps=case.steps,
+        )
+        histories[(start_id, "gradient_descent")] = gd
+        rows.append(summarize_run(case, start_id, "gradient_descent", x0, gd))
+
+        momentum_gd = run_momentum_gradient_descent(
+            case.objective,
+            x0,
+            alpha=case.alpha,
+            steps=case.steps,
+        )
+        histories[(start_id, "momentum_gradient_descent")] = momentum_gd
+        rows.append(
+            summarize_run(
+                case,
+                start_id,
+                "momentum_gradient_descent",
+                x0,
+                momentum_gd,
+            )
+        )
+
         adam = vanilla_adam(case.objective, x0, alpha=case.alpha, steps=case.steps)
         histories[(start_id, "vanilla_adam")] = adam
         rows.append(summarize_run(case, start_id, "vanilla_adam", x0, adam))
@@ -704,12 +854,12 @@ def aggregate_rows(rows: list[RunSummary]) -> list[dict[str, object]]:
                 "optimizer": optimizer,
                 "num_starts": len(subset),
                 "success_rate": float(np.mean([row.success for row in subset])),
-                "median_final_f": float(np.median([row.final_f for row in subset])),
-                "median_best_f": float(np.median([row.best_f for row in subset])),
-                "median_final_residual": float(np.median([row.final_residual for row in subset])),
-                "median_best_residual": float(np.median([row.best_residual for row in subset])),
-                "median_final_distance": float(np.median([row.final_distance for row in subset])),
-                "median_best_distance": float(np.median([row.best_distance for row in subset])),
+                "median_final_f": finite_median(row.final_f for row in subset),
+                "median_best_f": finite_median(row.best_f for row in subset),
+                "median_final_residual": finite_median(row.final_residual for row in subset),
+                "median_best_residual": finite_median(row.best_residual for row in subset),
+                "median_final_distance": finite_median(row.final_distance for row in subset),
+                "median_best_distance": finite_median(row.best_distance for row in subset),
                 "median_iterations_to_success": median_success_iteration(subset),
                 "median_accepted_rate": finite_median(row.accepted_rate for row in subset),
                 "median_final_alpha": finite_median(row.final_alpha for row in subset),
@@ -781,6 +931,29 @@ def plot_success_rates(aggregate: list[dict[str, object]], output_dir: Path) -> 
     fig.savefig(path, dpi=180)
     plt.close(fig)
     return path
+
+
+def report_optimizer_header(labels: dict[str, str] = OPTIMIZER_LABELS) -> str:
+    """Return a Markdown table header for optimizer winner counts."""
+
+    columns = " | ".join(labels.values())
+    separators = " | ".join("---:" for _ in labels)
+    return f"| Criterion | {columns} |\n|---|{separators}|"
+
+
+def report_optimizer_header_zh(labels: dict[str, str] = OPTIMIZER_LABELS_ZH) -> str:
+    """Return a Chinese Markdown table header for optimizer winner counts."""
+
+    columns = " | ".join(labels.values())
+    separators = " | ".join("---:" for _ in labels)
+    return f"| 指标 | {columns} |\n|---|{separators}|"
+
+
+def winner_row(label: str, counts: dict[str, int]) -> str:
+    """Format an optimizer winner-count row."""
+
+    values = " | ".join(str(counts.get(optimizer, 0)) for optimizer in OPTIMIZER_LABELS)
+    return f"| {label} | {values} |"
 
 
 def plot_median_best(aggregate: list[dict[str, object]], output_dir: Path) -> Path:
@@ -974,6 +1147,9 @@ def plot_highlight_trajectory(
     if len(minima) > 0:
         all_xs.append(minima)
     stacked = np.vstack(all_xs)
+    stacked = stacked[np.all(np.isfinite(stacked), axis=1)]
+    if len(stacked) == 0:
+        stacked = np.asarray(case.starts, dtype=float)
     xy_min = stacked.min(axis=0)
     xy_max = stacked.max(axis=0)
     span = np.maximum(xy_max - xy_min, 1e-8)
@@ -1006,6 +1182,9 @@ def plot_highlight_trajectory(
         history = histories[(start_id, optimizer)]
         stride = max(1, len(history.xs) // 90)
         xs = history.xs[::stride]
+        xs = xs[np.all(np.isfinite(xs), axis=1)]
+        if len(xs) == 0:
+            continue
         ax.plot(
             xs[:, 0],
             xs[:, 1],
@@ -1160,7 +1339,7 @@ def generate_report(
     lines.append("")
     lines.append("## Executive Summary")
     lines.append("")
-    lines.append(f"- The benchmark compares vanilla Adam against three controlled Adam variants on {num_objectives} deterministic {objective_word}.")
+    lines.append(f"- The benchmark compares gradient descent, momentum gradient descent, vanilla Adam, and three controlled Adam variants on {num_objectives} deterministic {objective_word}.")
     lines.append("- Every optimizer sees the same fixed starting points, iteration budgets, and objective gradients.")
     lines.append("- The clearest controlled-optimizer benefit is robustness: controlled raw-rho ties or wins the best success rate on every objective in this suite, and EMA-rho ties or wins on most of them.")
     lines.append("- Convergence quality is more mixed: vanilla Adam still ties or wins several median-residual comparisons when its fixed learning rate happens to be well matched.")
@@ -1169,26 +1348,10 @@ def generate_report(
     lines.append("")
     lines.append("Winner counts across objectives:")
     lines.append("")
-    lines.append("| Criterion | Vanilla Adam | Controlled raw-rho | Controlled EMA-rho | Controlled EMA+trust |")
-    lines.append("|---|---:|---:|---:|---:|")
-    lines.append(
-        f"| Highest success rate | {winners_success.get('vanilla_adam', 0)} | "
-        f"{winners_success.get('controlled_raw_rho', 0)} | "
-        f"{winners_success.get('controlled_ema_rho', 0)} | "
-        f"{winners_success.get('controlled_ema_trust', 0)} |"
-    )
-    lines.append(
-        f"| Lowest median final residual | {winners_final.get('vanilla_adam', 0)} | "
-        f"{winners_final.get('controlled_raw_rho', 0)} | "
-        f"{winners_final.get('controlled_ema_rho', 0)} | "
-        f"{winners_final.get('controlled_ema_trust', 0)} |"
-    )
-    lines.append(
-        f"| Lowest median best residual | {winners_best.get('vanilla_adam', 0)} | "
-        f"{winners_best.get('controlled_raw_rho', 0)} | "
-        f"{winners_best.get('controlled_ema_rho', 0)} | "
-        f"{winners_best.get('controlled_ema_trust', 0)} |"
-    )
+    lines.extend(report_optimizer_header().splitlines())
+    lines.append(winner_row("Highest success rate", winners_success))
+    lines.append(winner_row("Lowest median final residual", winners_final))
+    lines.append(winner_row("Lowest median best residual", winners_best))
     lines.append("")
     lines.append(f"Ties are counted for every tied optimizer, so row totals can exceed {num_objectives}.")
     lines.append("")
@@ -1198,6 +1361,8 @@ def generate_report(
     lines.append("")
     lines.append("| Optimizer | Meaning |")
     lines.append("|---|---|")
+    lines.append("| Gradient descent | Raw gradient direction with the same fixed learning rate used as the function-level base alpha. |")
+    lines.append("| Gradient descent + momentum | Classical velocity momentum gradient descent with momentum 0.9 and the same fixed learning rate. |")
     lines.append("| Vanilla Adam | Adam direction with a fixed global learning rate. |")
     lines.append("| Controlled Adam (raw rho) | Adam direction, but the global multiplier is updated from the current actual/predicted decrease ratio. |")
     lines.append("| Controlled Adam (EMA rho) | Same as raw-rho, but the rho signal is smoothed before changing the global multiplier. |")
@@ -1215,7 +1380,7 @@ def generate_report(
     lines.append("## Benchmark Design")
     lines.append("")
     lines.append(f"- {num_objectives} {objective_word} are tested.")
-    lines.append("- Each function uses five fixed starting points.")
+    lines.append("- Each function uses the configured fixed starting points, plus any deterministic random starts requested on the command line.")
     lines.append("- All optimizers use the same starts and iteration budget for that function.")
     lines.append("- Success is counted when the run reaches either a small residual above the known global minimum or a small distance to a known global minimizer.")
     lines.append("- Residual means `f(x) - f_min`, clipped at zero for numerical roundoff. This matters for functions such as Easom and Six-Hump Camel, whose global minima are negative.")
@@ -1343,7 +1508,7 @@ def generate_chinese_report(
     lines.append("")
     lines.append("## 核心结论")
     lines.append("")
-    lines.append(f"- 本次基准比较了标准 Adam 和三种受控 Adam 变体，共 {num_objectives} 个确定性二维目标函数。")
+    lines.append(f"- 本次基准比较了梯度下降、动量梯度下降、标准 Adam 和三种受控 Adam 变体，共 {num_objectives} 个确定性二维目标函数。")
     lines.append("- 所有优化器使用完全相同的初始点、迭代预算、目标函数和梯度。")
     lines.append("- 最清楚的收益是鲁棒性：受控 raw-rho 版本在本套函数中经常取得或并列取得最高成功率，EMA 版本通常更平滑。")
     lines.append("- 收敛质量不是单边胜利：当固定学习率刚好合适时，标准 Adam 仍然可能在某些残差指标上并列或领先。")
@@ -1354,26 +1519,10 @@ def generate_chinese_report(
     lines.append("")
     lines.append("各目标函数上的胜出次数：")
     lines.append("")
-    lines.append("| 指标 | 标准 Adam | 受控 raw-rho | 受控 EMA-rho | 受控 EMA+信赖域 |")
-    lines.append("|---|---:|---:|---:|---:|")
-    lines.append(
-        f"| 最高成功率 | {winners_success.get('vanilla_adam', 0)} | "
-        f"{winners_success.get('controlled_raw_rho', 0)} | "
-        f"{winners_success.get('controlled_ema_rho', 0)} | "
-        f"{winners_success.get('controlled_ema_trust', 0)} |"
-    )
-    lines.append(
-        f"| 最低最终残差中位数 | {winners_final.get('vanilla_adam', 0)} | "
-        f"{winners_final.get('controlled_raw_rho', 0)} | "
-        f"{winners_final.get('controlled_ema_rho', 0)} | "
-        f"{winners_final.get('controlled_ema_trust', 0)} |"
-    )
-    lines.append(
-        f"| 最低历史最佳残差中位数 | {winners_best.get('vanilla_adam', 0)} | "
-        f"{winners_best.get('controlled_raw_rho', 0)} | "
-        f"{winners_best.get('controlled_ema_rho', 0)} | "
-        f"{winners_best.get('controlled_ema_trust', 0)} |"
-    )
+    lines.extend(report_optimizer_header_zh().splitlines())
+    lines.append(winner_row("最高成功率", winners_success))
+    lines.append(winner_row("最低最终残差中位数", winners_final))
+    lines.append(winner_row("最低历史最佳残差中位数", winners_best))
     lines.append("")
     lines.append(f"如果多个优化器并列第一，会同时计入胜出次数，所以每一行的总数可能超过 {num_objectives}。")
     lines.append("")
@@ -1383,6 +1532,8 @@ def generate_chinese_report(
     lines.append("")
     lines.append("| 优化器 | 含义 |")
     lines.append("|---|---|")
+    lines.append("| 梯度下降 | 原始梯度方向，使用与该函数 Adam 基准相同的固定基础学习率。 |")
+    lines.append("| 动量梯度下降 | 经典速度动量梯度下降，动量系数为 0.9，并使用相同固定基础学习率。 |")
     lines.append("| 标准 Adam | Adam 方向，使用固定全局学习率。 |")
     lines.append("| 受控 Adam（原始 rho） | Adam 方向不变，但根据当前实际下降量/一阶预测下降量的比例更新全局步长乘子。 |")
     lines.append("| 受控 Adam（EMA 平滑 rho） | 与 raw-rho 相同，但先对 rho 做指数滑动平均，再更新全局步长乘子。 |")
@@ -1400,7 +1551,7 @@ def generate_chinese_report(
     lines.append("## 基准设计")
     lines.append("")
     lines.append(f"- 共测试 {num_objectives} 个目标函数。")
-    lines.append("- 每个函数使用五个固定初始点。")
+    lines.append("- 每个函数使用配置中的固定初始点；如果命令行要求，会再加入确定性随机初始点。")
     lines.append("- 同一个函数内，所有优化器使用相同初始点和相同迭代预算。")
     lines.append("- 成功条件：达到足够小的目标残差，或离已知全局极小点足够近。")
     lines.append("- 残差定义为 `f(x) - f_min`，并对数值误差截断到非负值。这样比直接比较目标函数值更公平，因为有些函数的全局最小值是负数。")
@@ -1506,13 +1657,13 @@ def winner_counts(
     objectives = sorted({str(row["objective"]) for row in aggregate})
     for objective in objectives:
         rows = [row for row in aggregate if row["objective"] == objective]
-        values = [float(row[metric]) for row in rows]
-        if lower_is_better:
-            target = min(values)
-        else:
-            target = max(values)
+        finite_values = [float(row[metric]) for row in rows if np.isfinite(float(row[metric]))]
+        if not finite_values:
+            continue
+        target = min(finite_values) if lower_is_better else max(finite_values)
         for row in rows:
-            if math.isclose(float(row[metric]), target, rel_tol=1e-12, abs_tol=1e-12):
+            value = float(row[metric])
+            if np.isfinite(value) and math.isclose(value, target, rel_tol=1e-12, abs_tol=1e-12):
                 counts[str(row["optimizer"])] += 1
     return counts
 

@@ -1,6 +1,6 @@
 # Conversation Log
 
-Last updated: 2026-05-26
+Last updated: 2026-05-27
 
 Current handoff note: see `PROJECT_HANDOFF.md` first. For a concise
 chronological engineering timeline, see `DEVELOPMENT_LOG.md`. This file remains
@@ -12,6 +12,15 @@ added, neural-network Muon paths now follow official `torch.optim.Muon` scope,
 and old experimental outputs were archived under timestamped backup folders on
 2026-05-26. Older Muon neural benchmark notes in this log are historical if
 they predate the official-style Muon grouping fix.
+
+Delayed-feedback note: `delayed_feedback_adam/` and
+`delayed_feedback_muon/` are new standalone optimizer experiments. They use the
+next naturally computed loss to evaluate the previous step, avoiding the extra
+same-minibatch forward pass used by the same-step controllers. This is lower
+overhead but one-step delayed and noisier for ordinary minibatch training. The
+delayed AdamW and Muon inner directions were checked against local PyTorch
+`2.10.0`; delayed Muon now follows 2D-only `torch.optim.Muon` conventions for
+momentum, Nesterov, shape scaling, and decoupled weight decay.
 
 For manager-facing deterministic function optimization results, see
 `FUNCTION_OPTIMIZATION_BENCHMARK_SUITE.md` and regenerate the local report with
@@ -27,7 +36,7 @@ workspace so future sessions can resume without rediscovering the project.
 
 ## Workspace Overview
 
-The workspace contains five related project areas:
+The workspace contains seven related project areas:
 
 1. Root project: `adaptive_stepsize_control`
    - Demonstrates fixed-step gradient descent, noisy stochastic gradient
@@ -62,6 +71,16 @@ The workspace contains five related project areas:
      PI control.
    - Follows official `torch.optim.Muon` neural-network scope: Muon for 2D
      hidden matrix parameters and AdamW-style fallback for the rest.
+
+6. Standalone optimizer folder: `delayed_feedback_adam`
+   - Packages a delayed-feedback Adam/AdamW-style optimizer.
+   - Uses the next computed loss as feedback for the previous step, avoiding
+     immediate trial-point reevaluation.
+
+7. Standalone optimizer folder: `delayed_feedback_muon`
+   - Packages a delayed-feedback Muon/AdamW optimizer.
+   - Uses 2D-only Muon directions plus AdamW fallback, aligned with local
+     `torch.optim.Muon`/`torch.optim.AdamW` behavior for the supported paths.
 
 Recent Adam CIFAR-10 tuning context:
 
@@ -1652,3 +1671,318 @@ the correct basin, but it does not solve global basin selection. The important
 nuance for future reporting is: controlled Adam improves local convergence
 speed inside the right basin; Rastrigin from far-away starts needs multi-start
 or global exploration.
+
+## Controlled Adam Tuning Interpretation
+
+The user asked why `controlled_ema_trust` did not improve over
+`controlled_ema_rho`. We checked the trust diagnostics and found the likely
+cause: the trust expansion gate was mostly dormant. The current deterministic
+function setting required high smoothed rho and `alpha <= 1e-4`, so median trust
+expansions were usually zero. This means earlier EMA+trust results should not
+be interpreted as strong evidence against trust-region recovery; they mostly
+tested EMA-rho with an unreachable or rarely reached trust hook.
+
+We added three controlled-Adam tuning scripts:
+
+```text
+controlled_adam_project/examples/run_controlled_adam_parameter_sweep.py
+controlled_adam_project/examples/run_controlled_adam_tuning_sweep.py
+controlled_adam_project/examples/run_controlled_adam_refined_tuning_sweep.py
+```
+
+The refined sweep tested 123 controlled-Adam variants on the nine deterministic
+functions with 30 starts each. Output:
+
+```text
+outputs/controlled_adam_refined_tuning_sweep_30runs/
+```
+
+Validation:
+
+```text
+33,210 per-start rows = 9 objectives x 123 variants x 30 starts
+1,107 aggregate rows
+all objective/variant groups have 30 starts
+```
+
+The refined result:
+
+```text
+raw-rho current 0.370 -> tuned 0.437
+EMA-rho current 0.359 -> tuned 0.444
+EMA+trust current 0.359 -> tuned 0.489
+```
+
+Best settings:
+
+```text
+raw-rho:    rho_star - 0.2, kp x2, alpha_min=1e-5
+EMA-rho:    rho_star - 0.2, kp x2, alpha_min=1e-5
+EMA+trust:  rho_beta=0.95, rho>=0.70, alpha<=1e-2, expand x2, alpha_min=1e-5
+```
+
+The interpretation is that all three controlled families can be improved on the
+function suite. Raw-rho and EMA-rho mainly benefit from not collapsing to
+`alpha_min=1e-8`; a higher floor and stronger gain keep useful progress alive.
+Trust improves the most once the expansion condition is reachable; the best
+tuned trust setting has median trust expansions around `12` across objective
+rows. Ackley and Rastrigin still remain basin-selection limitation cases.
+
+Important caveat for future agents: these are deterministic 2D function
+parameters, not automatic neural defaults. Neural Adam-scale runs need trust
+thresholds matched to their active alpha range, usually around the alpha floor
+used in that run.
+
+The user was concerned that the optimizer now has too many hyperparameters.
+We agreed this is a real usability problem if all raw knobs are presented to a
+user. The proposed fix was to collapse raw hyperparameters into scale-relative
+presets: alpha bounds derived from the base learning rate or `alpha0`, trust
+threshold derived from the same active alpha scale, and a small response preset
+such as conservative/balanced/aggressive.
+
+We implemented:
+
+```text
+controlled_adam_project/examples/run_controlled_adam_simplified_tuning_sweep.py
+```
+
+This sweep exposes only:
+
+```text
+family = raw / ema / trust
+response_preset = conservative / balanced / aggressive
+alpha_preset = low_floor / mid_floor / wide_cap / high_floor
+```
+
+Output:
+
+```text
+outputs/controlled_adam_simplified_tuning_sweep_30runs/
+```
+
+Validation:
+
+```text
+10,530 per-start rows = 9 objectives x 39 variants x 30 starts
+351 aggregate rows
+all objective/variant groups have 30 starts
+```
+
+Result:
+
+```text
+raw-rho current 0.370 -> simplified 0.470
+EMA-rho current 0.359 -> simplified 0.485
+EMA+trust current 0.359 -> simplified 0.504
+```
+
+The common winning preset was `aggressive_high_floor`:
+
+```text
+kp_multiplier = 2
+rho_star_delta = -0.2
+rho_beta = 0.90
+trust_region_rho_threshold = 0.60
+trust_region_expand_factor = 3
+alpha_min = 0.01 * alpha0
+alpha_max = 50 * alpha0
+trust_region_alpha_threshold = 3 * alpha0
+```
+
+This is encouraging: the simplified preset interface recovered and slightly
+exceeded the refined raw-parameter sweep on deterministic functions. The caveat
+is that the best preset is aggressive and function-suite-specific; before making
+it a default, it needs a neural validation where alpha bounds and trust
+thresholds are derived from the neural base learning rate.
+
+We then investigated the fixed gradient-descent baseline on Goldstein-Price.
+The original tuned no-momentum report used the same per-objective `alpha0` for
+GD that Adam uses as its base learning rate. That is too large for raw
+Goldstein-Price gradients: most GD starts immediately jump out of the useful
+basin, and `best_iteration = 0` for `29/30` Goldstein-Price starts.
+
+We updated:
+
+```text
+controlled_adam_project/examples/run_function_benchmark_tuned_simplified_report.py
+```
+
+with:
+
+```bash
+--gradient-descent-alpha-multiplier VALUE
+```
+
+This changes only fixed `gradient_descent`; Adam and controlled Adam still use
+the original `alpha0`. New full report outputs:
+
+```text
+outputs/function_benchmark_30runs_controlled_adam_tuned_no_momentum_gd_lr0p03/
+outputs/function_benchmark_30runs_controlled_adam_tuned_no_momentum_gd_lr0p05/
+```
+
+Both reports validate to `1,350` per-start rows and `45` aggregate rows, and
+the non-GD aggregate metrics are identical to the original tuned no-momentum
+report. GD-only comparison:
+
+```text
+GD alpha       avg success  mean log10 best  Goldstein success  Goldstein best  Goldstein final
+1.0 * alpha0   0.278        -2.354           0.033              1512.07         2.64e20
+0.03 * alpha0  0.167        -0.255           0.367              27.0            27.0
+0.05 * alpha0  0.174        -0.784           0.167              1072.09         6.88e14
+```
+
+Interpretation: `0.03 * alpha0` is the most Goldstein-stable fixed-GD baseline
+tested so far. `0.05 * alpha0` is slightly better overall than `0.03 * alpha0`,
+but Goldstein-Price starts becoming unstable again. The original `1.0 * alpha0`
+is faster on some functions where GD does not explode, so fixed GD should be
+treated as learning-rate sensitive rather than a single definitive baseline.
+
+## Delayed Adam CIFAR ResNet And Fixed-LR Discussion
+
+The user asked to run longer CIFAR-10 ResNet tests using the best delayed Adam
+variants alongside same-step controlled Adam, explicitly including raw-rho and
+EMA versions. We added and used:
+
+```text
+delayed_feedback_adam/examples/run_cifar_resnet_adam_comparison.py
+```
+
+The 20-epoch run used CIFAR-10 `resnet_cifar`, 10k train / 2k test, batch size
+128, seed 123, base LR `1e-3`, and checkpoints every 5 epochs.
+
+Output:
+
+```text
+outputs/cifar10_resnet_adam_delayed_10k_2k_20epoch_seed123_raw_ema/
+```
+
+The output folder contains a self-contained `REPORT.md`, epoch metrics, step
+diagnostics, plots, and checkpoints.
+
+Final metrics:
+
+```text
+optimizer                 test_acc  test_loss  train_loss
+vanilla_adam              0.6915    0.9454     0.7499
+controlled_raw_rho        0.7395    0.7715     0.5830
+controlled_ema            0.7135    0.8488     0.6656
+controlled_ema_trust      0.7135    0.8488     0.6656
+delayed_raw               0.6825    0.9768     0.7820
+delayed_ema               0.6960    0.9009     0.7334
+delayed_safe              0.6985    0.9156     0.7194
+delayed_ema_floor90       0.6950    0.8840     0.6783
+```
+
+The same-step controlled raw-rho variant was best on accuracy and loss. Same-step
+EMA improved over vanilla but not as much. EMA+trust matched EMA exactly because
+the trust expansion count was zero. The delayed variants were much cheaper per
+step but only matched or slightly exceeded vanilla Adam, with `delayed_safe`
+best by final accuracy at `0.6985`.
+
+The important diagnostic was the rho scale. Same-step controlled variants had
+final mean rho around `0.88` and reached `1.5e-3`. Delayed variants had final
+mean rho around `0.13-0.18` and were pushed to their configured floors
+(`7.5e-4`, `8.0e-4`, or `9.0e-4`). This means the delayed feedback mechanism
+should not reuse same-step targets like `rho_star=0.7-0.8` without calibration.
+The next delayed Adam tuning should sweep lower delayed-specific targets,
+probably around `0.15-0.30`, and alpha floors/caps around Adam scale.
+
+The user then asked about the fixed-learning-rate logic: if higher fixed LR
+works for vanilla Adam, couldn't we just raise the controlled optimizer's upper
+bound? The answer is yes, and that is precisely why fixed-LR baselines are
+necessary. They are not evidence against controlled Adam; they separate
+possible explanations:
+
+1. Adam simply likes a larger fixed LR on this task.
+2. The controlled optimizer is mostly implementing a useful warmup/ramp from
+   `1e-3` to `1.5e-3`.
+3. The rho controller is genuinely adapting the step size in a way fixed LR or
+   a simple schedule does not.
+
+A compelling controlled optimizer should do well across a reasonably broad cap,
+avoid destructive use of an overly high cap, and beat or match fixed-LR and
+simple-schedule baselines over multiple seeds. Future ResNet comparisons should
+therefore include fixed Adam at several learning rates and a simple warmup
+schedule, while also tracking alpha/rho diagnostics.
+
+## Controlled Adam ResNet Alpha-Control Diagnostics
+
+The user asked why reaching `alpha_max` is a problem. The clarified answer is:
+reaching the maximum is not inherently bad. It is only a concern if the
+controller's local same-minibatch rho signal keeps pushing alpha upward even
+when long-horizon validation accuracy would prefer a lower or different
+schedule. The controller is measuring actual-versus-predicted local loss
+agreement, not directly optimizing final validation accuracy.
+
+We clarified that the ResNet used in these runs is the project-specific
+`SmallCIFARResNet`, not torchvision ResNet-18. It has a `3x3` stride-1 CIFAR
+stem, stages with widths `16`, `32`, and `64`, two basic blocks per stage,
+adaptive average pooling, a `64 -> 10` head, and `175258` trainable
+parameters.
+
+The high-LR/high-cap alpha cliff investigation found that the large drops in
+`cifar10_controlled_alpha.png` are caused by backtracking. With
+`backtrack_shrink=0.5`, a single accepted retry halves the step. A sweep over
+gentler settings was summarized in:
+
+```text
+outputs/cifar10_resnet_adam_backtracking_sweep_highlr2e3_cap2p5e3_seed123/
+```
+
+Best new backtracking compromise in that high-cap setting was
+`backtrack_shrink=0.7`, `rho_min=0.1`, with final accuracy `0.7030` for raw-rho
+and `0.7090` for EMA. It smoothed alpha but did not beat the balanced lower-cap
+settings.
+
+We then ran a clean cap sweep with fixed `lr=1e-3`, `alpha_min=1e-3`,
+`rho_star=0.80`, `kp=0.02`, and `alpha_max` varied:
+
+```text
+outputs/cifar10_resnet_adam_cap_sweep_lr1e3_seed123/
+
+alpha_max   raw-rho final   EMA final
+1.50e-3     0.7395          0.7135
+1.75e-3     0.7395          0.7240
+2.00e-3     0.7290          0.7245
+2.25e-3     0.7155          0.7355
+```
+
+There were zero backtracking events in this clean cap sweep, yet alpha reached
+every tested cap under `rho_star=0.80`. This showed that the upward pressure
+came from the rho target itself, not from backtracking recovery. Raw-rho
+preferred `1.5e-3` to `1.75e-3`; EMA preferred more headroom on this
+single-seed subset.
+
+We added optional asymmetric gain to controlled Adam:
+
+```text
+gain = kp if rho_control >= rho_star else kp_down
+```
+
+This is available as `TorchControlledAdam(..., kp_down=...)` and
+`--controlled-kp-down` in the CIFAR comparison runner. If omitted,
+`kp_down=kp`, so old behavior is preserved. The full current algorithm is now
+documented in:
+
+```text
+controlled_adam_project/CONTROLLED_ADAM_ALGORITHM.md
+```
+
+We tested the two first remedies:
+
+```text
+outputs/cifar10_resnet_adam_rhostar_asym_gain_seed123/
+
+setting                         raw-rho final   EMA final   alpha behavior
+rho_star=0.80 symmetric         0.7155          0.7355      reaches cap
+rho_star=0.85 symmetric         0.7115          0.6980      avoids cap
+rho_star=0.80, kp_down=0.08     0.6950          0.7330      mostly reaches cap
+```
+
+Interpretation: raising `rho_star` works mechanically and makes alpha
+self-limiting, but `0.85` was too conservative for the 20-epoch setup.
+Asymmetric downward gain delayed saturation but did not fix it because the
+average rho signal was still above target. The next useful middle-ground test
+is probably `rho_star=0.825`, `kp=0.02`, `kp_down=0.04` or `0.06`,
+`alpha_max=2.25e-3`.
