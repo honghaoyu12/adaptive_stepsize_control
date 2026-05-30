@@ -1,6 +1,6 @@
 # Development Log
 
-Last updated: 2026-05-28
+Last updated: 2026-05-30
 
 This is the chronological engineering log for `adaptive_stepsize_control`.
 
@@ -781,27 +781,27 @@ alpha_max   raw-rho final   EMA final
   every tested cap under `rho_star=0.80`. Interpretation: cap saturation is not
   automatically bad, but the current same-step rho target is permissive enough
   that it does not find an interior alpha optimum on this task.
-- Added optional asymmetric decrease gain:
-  `TorchControlledAdam(..., kp_down=...)`, the NumPy controlled Adam equivalent,
-  and CIFAR CLI flag `--controlled-kp-down`. If omitted, `kp_down` defaults to
-  `kp`, preserving the old symmetric update.
-- Raised-target/asymmetric-gain test output:
+- A temporary separate decrease-gain experiment was tried and then removed
+  from the active implementation because it added tuning complexity without
+  improving the 20-epoch CIFAR result. The current controller exposes only the
+  single proportional gain `kp`.
+- Raised-target / separate-decrease-gain test output:
   `outputs/cifar10_resnet_adam_rhostar_asym_gain_seed123/`.
 
 ```text
 setting                         raw-rho final   EMA final   alpha behavior
 rho_star=0.80 symmetric         0.7155          0.7355      reaches cap
 rho_star=0.85 symmetric         0.7115          0.6980      avoids cap
-rho_star=0.80, kp_down=0.08     0.6950          0.7330      mostly reaches cap
+rho_star=0.80, extra down gain  0.6950          0.7330      mostly reaches cap
 ```
 
 - Raising `rho_star` worked mechanically and made alpha self-limiting, but
-  `0.85` was too conservative for this 20-epoch setup. Asymmetric
-  `kp_down=0.08` delayed saturation but did not improve accuracy because rho
-  remained above target often enough that alpha eventually climbed back.
+  `0.85` was too conservative for this 20-epoch setup. The extra decrease gain
+  delayed saturation but did not improve accuracy because rho remained above
+  target often enough that alpha eventually climbed back.
 - Recommended next compact controller test:
-  `rho_star=0.825`, `kp=0.02`, `kp_down=0.04` or `0.06`,
-  `alpha_max=2.25e-3`, variants `controlled_raw_rho` and `controlled_ema`.
+  `rho_star=0.825`, `kp=0.02`, `alpha_max=2.25e-3`, variants
+  `controlled_raw_rho` and `controlled_ema`.
 
 ## 4. Fashion-MNIST Adam Experiments
 
@@ -2001,7 +2001,140 @@ GD alpha       avg success  mean log10 best  Goldstein success  Goldstein best  
   function-specific tuning or line search if it is meant to be a strong
   baseline.
 
-## 17. Recommended Next Engineering Steps
+## 17. Controlled Adam Non-Descent Gradient Fallback
+
+Changed the controlled Adam non-descent branch after discussing whether the
+old behavior wasted minibatches. Previously, if Adam's momentum direction was
+not a descent direction for the current minibatch, the optimizer shrank
+`alpha` and skipped the parameter update while still updating Adam moments.
+
+The new behavior is less conservative:
+
+```text
+if -<g, d_adam> <= 0 and ||g|| > 0 and ||d_adam|| > 0:
+    d = -g * ||d_adam|| / (||g|| + eps)
+else:
+    d = d_adam
+```
+
+The same same-minibatch trial evaluation, backtracking, bad-step rejection,
+clipped-rho control, and single-gain alpha update then run on the effective
+direction. The old shrink-and-skip path remains only for degenerate
+zero-gradient or zero-direction cases.
+
+Files changed:
+
+- `controlled_adam_project/src/controlled_adam/optimizers.py`
+- `controlled_adam_project/src/controlled_adam/torch_optimizers.py`
+- `controlled_adam_project/examples/run_function_benchmark_report.py`
+- `controlled_adam_project/examples/run_mnist_demo.py`
+- `controlled_adam_project/CONTROLLED_ADAM_ALGORITHM.md`
+
+Diagnostics added:
+
+- deterministic histories now include `gradient_fallback_used`;
+- PyTorch minibatch step logs now include `used_gradient_fallback`;
+- MNIST/CIFAR step CSVs include `used_gradient_fallback`.
+
+Validation:
+
+```text
+cd controlled_adam_project
+PYTHONPATH=src pytest -q tests
+11 passed
+```
+
+## 18. Controlled Adam v5.1 Controller Stabilization
+
+Implemented the v5.1 subset of `controlled_adam_production_fix_plan_v5.md`,
+with one deliberate change: the non-descent fallback remains the norm-matched
+negative-gradient fallback rather than raw `-g`.
+
+Mechanics changed:
+
+- Rho now uses a floored denominator:
+
+```text
+predicted_safe = max(predicted_raw,
+                     absolute_predicted_floor,
+                     ratio_eps,
+                     relative_predicted_floor * |loss_before|)
+```
+
+- Acceptance uses measured rho, while EMA/controller updates use clipped rho:
+
+```text
+rho_measured = actual / predicted_safe
+rho_clipped = clip(rho_measured, rho_clip_min, rho_clip_max)
+```
+
+- A fully rejected trial sequence cannot increase the next alpha.
+- Default backtracking depth is now `max_backtracks=1`, but it remains
+  configurable.
+- Trust expansion now requires `trust_region_patience` consecutive accepted,
+  non-backtracked, high-rho steps and is capped by `trust_region_max_factor`.
+
+Defaults added:
+
+```text
+absolute_predicted_floor = 1e-12
+relative_predicted_floor = 1e-8
+rho_clip_min = -1.0
+rho_clip_max = 3.0
+trust_region_patience = 2
+trust_region_max_factor = 1.5
+max_backtracks = 1
+```
+
+Diagnostics added:
+
+- `rho_clipped`
+- `predicted_decrease_safe`
+- `predicted_was_floored`
+- `rho_was_clipped`
+- `direction_type`
+- `trust_good_count`
+
+Updated code paths:
+
+- `TorchControlledAdam`
+- deterministic `controlled_adam`
+- local EMA/trust helper in the function benchmark report
+- MNIST/CIFAR step diagnostics CSVs
+- deterministic diagnostics CSVs
+
+Validation:
+
+```text
+cd controlled_adam_project
+PYTHONPATH=src pytest -q tests
+17 passed
+```
+
+AdamW mode from the v5 plan was intentionally not implemented in this pass; it
+should be a separate semantic patch.
+
+## 19. Controlled Adam Single-Gain Documentation Cleanup
+
+Removed the temporary separate downward-gain parameter from the active
+documentation and clarified the simplified controller interface:
+
+- active controlled Adam exposes one proportional gain, `kp`;
+- historical `kp_down` / separate downward-gain experiments remain useful as
+  evidence, but should not be treated as active API;
+- backtracking is current-step retry logic, while alpha control is a next-step
+  multiplier update;
+- an accepted step can still decrease the next alpha when the same-minibatch
+  loss decreased but the ratio was below `rho_star`;
+- rho clipping is for controller robustness, factor clipping limits the
+  per-step alpha-change speed, and alpha clipping enforces the configured
+  operating range.
+
+Updated `controlled_adam_project/CONTROLLED_ADAM_ALGORITHM.md` to use compact
+PyCharm-readable display equations and to keep code names in prose rather than
+as English-like math variables.
+
+## 20. Recommended Next Engineering Steps
 
 1. Tune delayed-feedback Adam using delayed-specific rho targets. The latest
    ResNet comparison showed delayed `rho_bar` around `0.13-0.24`, far below the

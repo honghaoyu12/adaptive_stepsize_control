@@ -226,6 +226,11 @@ def run_variant(
             if variant.trust_region_expand_factor is None
             else variant.trust_region_expand_factor
         ),
+        trust_region_max_factor=(
+            case.trust_region_expand_factor
+            if variant.trust_region_expand_factor is None
+            else variant.trust_region_expand_factor
+        ),
     )
 
 

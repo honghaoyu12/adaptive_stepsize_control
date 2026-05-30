@@ -7,11 +7,11 @@ variants on the 2D objective functions already implemented in the project:
 - vanilla gradient descent uses the raw gradient with a fixed learning rate;
 - momentum gradient descent uses the same learning rate with classical
   velocity momentum;
-- raw-rho controlled Adam updates alpha directly from rho_t;
+- raw-rho controlled Adam updates alpha directly from the clipped measured rho;
 - EMA-rho controlled Adam updates alpha from an exponential moving average of
-  rho_t.
-- EMA-rho plus trust-region recovery can force faster expansion when rho is
-  high but alpha is already tiny.
+  clipped measured rho;
+- EMA-rho plus trust-region recovery can force bounded, patience-based
+  expansion when rho is high but alpha is already tiny.
 
 The suite uses multiple fixed initial points per function, writes CSV summaries,
 generates manager-friendly plots, and produces a Markdown report in the output
@@ -45,7 +45,12 @@ from controlled_adam.objectives import (
     Rosenbrock,
     SixHumpCamel,
 )
-from controlled_adam.optimizers import OptimizationHistory, controlled_adam, vanilla_adam
+from controlled_adam.optimizers import (
+    OptimizationHistory,
+    _measure_rho,
+    controlled_adam,
+    vanilla_adam,
+)
 
 
 OPTIMIZER_LABELS = {
@@ -181,12 +186,18 @@ class BenchmarkCase:
     alpha_min: float = 1e-8
     rho_min: float = 0.0
     ema_beta: float = 0.90
-    max_backtracks: int = 8
+    max_backtracks: int = 1
     min_alpha_factor: float = 0.5
     max_alpha_factor: float = 1.25
     trust_region_rho_threshold: float = 0.90
     trust_region_alpha_threshold: float = 1e-4
     trust_region_expand_factor: float = 1.5
+    trust_region_max_factor: float = 1.5
+    trust_region_patience: int = 2
+    absolute_predicted_floor: float = 1e-12
+    relative_predicted_floor: float = 1e-8
+    rho_clip_min: float = -1.0
+    rho_clip_max: float = 3.0
 
 
 @dataclass
@@ -330,14 +341,20 @@ def controlled_adam_ema_rho(
     eps: float = 1e-8,
     non_descent_shrink: float = 0.5,
     reject_bad_steps: bool = True,
-    max_backtracks: int = 8,
+    max_backtracks: int = 1,
     backtrack_shrink: float = 0.5,
+    absolute_predicted_floor: float = 1e-12,
+    relative_predicted_floor: float = 1e-8,
+    rho_clip_min: float = -1.0,
+    rho_clip_max: float = 3.0,
     min_alpha_factor: float | None = None,
     max_alpha_factor: float | None = None,
     trust_region_expand: bool = False,
     trust_region_rho_threshold: float = 0.90,
     trust_region_alpha_threshold: float = 1e-4,
     trust_region_expand_factor: float = 1.5,
+    trust_region_max_factor: float = 1.5,
+    trust_region_patience: int = 2,
 ) -> OptimizationHistory:
     """Run controlled Adam while smoothing rho before updating alpha.
 
@@ -359,12 +376,23 @@ def controlled_adam_ema_rho(
         raise ValueError("steps must be positive.")
     if not (0.0 < alpha_min <= alpha_max):
         raise ValueError("alpha bounds must satisfy 0 < alpha_min <= alpha_max.")
+    if absolute_predicted_floor <= 0.0:
+        raise ValueError("absolute_predicted_floor must be positive.")
+    if relative_predicted_floor < 0.0:
+        raise ValueError("relative_predicted_floor must be non-negative.")
+    if rho_clip_min >= rho_clip_max:
+        raise ValueError("rho_clip_min must be < rho_clip_max.")
+    if trust_region_max_factor <= 1.0:
+        raise ValueError("trust_region_max_factor must be > 1.")
+    if trust_region_patience < 1:
+        raise ValueError("trust_region_patience must be >= 1.")
 
     x = np.asarray(x0, dtype=float).copy()
     alpha = float(np.clip(alpha0, alpha_min, alpha_max))
     m = np.zeros_like(x)
     v = np.zeros_like(x)
     rho_ema: float | None = None
+    trust_good_count = 0
 
     xs = [x.copy()]
     fs = [objective.value(x)]
@@ -376,6 +404,13 @@ def controlled_adam_ema_rho(
     accepted = []
     descent_scores = []
     trust_expanded = []
+    gradient_fallback_used = []
+    rhos_clipped = []
+    predicted_decreases_safe = []
+    predicted_was_floored = []
+    rho_was_clipped = []
+    direction_types = []
+    trust_good_counts = []
 
     for t in range(1, steps + 1):
         f_t = objective.value(x)
@@ -389,9 +424,15 @@ def controlled_adam_ema_rho(
         p = -m_hat / (np.sqrt(v_hat) + eps)
 
         descent_score = -float(np.dot(g, p))
+        used_gradient_fallback = False
+        direction_type = "adam"
 
         rho = np.nan
+        rho_clipped = np.nan
         predicted_decrease = 0.0
+        predicted_decrease_safe = 0.0
+        was_floored = False
+        was_clipped = False
         actual_decrease = 0.0
         step_accepted = False
         alpha_used = alpha
@@ -399,6 +440,17 @@ def controlled_adam_ema_rho(
         expanded = False
 
         if descent_score <= 0.0:
+            g_norm = float(np.linalg.norm(g))
+            p_norm = float(np.linalg.norm(p))
+            if g_norm > 0.0 and p_norm > 0.0:
+                p = -g * (p_norm / (g_norm + eps))
+                descent_score = -float(np.dot(g, p))
+                used_gradient_fallback = True
+                direction_type = "gradient_fallback"
+
+        if descent_score <= 0.0:
+            direction_type = "degenerate_skip"
+            trust_good_count = 0
             alpha = float(np.clip(alpha * non_descent_shrink, alpha_min, alpha_max))
         else:
             trial_alpha = alpha
@@ -407,12 +459,31 @@ def controlled_adam_ema_rho(
                 f_candidate = objective.value(x_candidate)
                 candidate_predicted = trial_alpha * descent_score
                 candidate_actual = f_t - f_candidate
-                candidate_rho = candidate_actual / (candidate_predicted + eps)
+                (
+                    candidate_rho,
+                    candidate_rho_clipped,
+                    candidate_predicted_safe,
+                    candidate_was_floored,
+                    candidate_was_clipped,
+                ) = _measure_rho(
+                    actual_decrease=candidate_actual,
+                    predicted_decrease_raw=candidate_predicted,
+                    loss_before_value=f_t,
+                    eps=eps,
+                    absolute_predicted_floor=absolute_predicted_floor,
+                    relative_predicted_floor=relative_predicted_floor,
+                    rho_clip_min=rho_clip_min,
+                    rho_clip_max=rho_clip_max,
+                )
 
                 if (not reject_bad_steps) or (candidate_rho > rho_min):
                     predicted_decrease = candidate_predicted
+                    predicted_decrease_safe = candidate_predicted_safe
                     actual_decrease = candidate_actual
                     rho = candidate_rho
+                    rho_clipped = candidate_rho_clipped
+                    was_floored = candidate_was_floored
+                    was_clipped = candidate_was_clipped
                     alpha_used = trial_alpha
                     num_backtracks = j
                     step_accepted = True
@@ -420,36 +491,69 @@ def controlled_adam_ema_rho(
                     break
 
                 predicted_decrease = candidate_predicted
+                predicted_decrease_safe = candidate_predicted_safe
                 actual_decrease = candidate_actual
                 rho = candidate_rho
+                rho_clipped = candidate_rho_clipped
+                was_floored = candidate_was_floored
+                was_clipped = candidate_was_clipped
                 alpha_used = trial_alpha
                 num_backtracks = j
                 trial_alpha = max(alpha_min, trial_alpha * backtrack_shrink)
 
-            if step_accepted:
-                if np.isfinite(rho):
-                    rho_ema = rho if rho_ema is None else (
-                        rho_beta * rho_ema + (1.0 - rho_beta) * rho
-                    )
-                    rho_control = rho_ema
-                else:
-                    rho_control = rho_star
-                factor = float(np.exp(kp * (rho_control - rho_star)))
-                if min_alpha_factor is not None or max_alpha_factor is not None:
-                    lower = 0.0 if min_alpha_factor is None else min_alpha_factor
-                    upper = np.inf if max_alpha_factor is None else max_alpha_factor
-                    factor = float(np.clip(factor, lower, upper))
-                if (
-                    trust_region_expand
-                    and num_backtracks == 0
-                    and rho_control >= trust_region_rho_threshold
-                    and alpha_used <= trust_region_alpha_threshold
-                ):
-                    factor = max(factor, trust_region_expand_factor)
-                    expanded = True
-                alpha = alpha_used * factor
+            if np.isfinite(rho_clipped):
+                rho_ema = rho_clipped if rho_ema is None else (
+                    rho_beta * rho_ema + (1.0 - rho_beta) * rho_clipped
+                )
+                rho_control = rho_ema
             else:
-                alpha = alpha_used * backtrack_shrink
+                rho_control = rho_star
+
+            factor = float(np.exp(kp * (rho_control - rho_star)))
+            if min_alpha_factor is not None or max_alpha_factor is not None:
+                lower = 0.0 if min_alpha_factor is None else min_alpha_factor
+                upper = np.inf if max_alpha_factor is None else max_alpha_factor
+                factor = float(np.clip(factor, lower, upper))
+            if not step_accepted:
+                factor = min(factor, 1.0)
+
+            if (
+                step_accepted
+                and num_backtracks == 0
+                and rho_control >= trust_region_rho_threshold
+            ):
+                trust_good_count += 1
+            else:
+                trust_good_count = 0
+
+            if (
+                trust_region_expand
+                and step_accepted
+                and num_backtracks == 0
+                and rho_control >= trust_region_rho_threshold
+                and alpha_used <= trust_region_alpha_threshold
+                and trust_good_count >= trust_region_patience
+            ):
+                factor = max(factor, trust_region_expand_factor)
+                factor = min(factor, trust_region_max_factor)
+                expanded = True
+
+            gamma_hard_max = max_alpha_factor
+            if trust_region_expand:
+                gamma_hard_max = (
+                    trust_region_max_factor
+                    if gamma_hard_max is None
+                    else max(gamma_hard_max, trust_region_max_factor)
+                )
+            if min_alpha_factor is not None or gamma_hard_max is not None:
+                lower = 0.0 if min_alpha_factor is None else min_alpha_factor
+                upper = np.inf if gamma_hard_max is None else gamma_hard_max
+                if not step_accepted:
+                    lower = min(lower, 1.0)
+                    upper = min(upper, 1.0)
+                factor = float(np.clip(factor, lower, upper))
+
+            alpha = alpha_used * factor
 
             alpha = float(np.clip(alpha, alpha_min, alpha_max))
 
@@ -463,6 +567,13 @@ def controlled_adam_ema_rho(
         accepted.append(step_accepted)
         descent_scores.append(descent_score)
         trust_expanded.append(expanded)
+        gradient_fallback_used.append(used_gradient_fallback)
+        rhos_clipped.append(rho_clipped)
+        predicted_decreases_safe.append(predicted_decrease_safe)
+        predicted_was_floored.append(was_floored)
+        rho_was_clipped.append(was_clipped)
+        direction_types.append(direction_type)
+        trust_good_counts.append(trust_good_count)
 
     history = OptimizationHistory(
         xs=np.asarray(xs),
@@ -476,6 +587,13 @@ def controlled_adam_ema_rho(
         descent_scores=np.asarray(descent_scores),
     )
     history.trust_region_expanded = np.asarray(trust_expanded)
+    history.gradient_fallback_used = np.asarray(gradient_fallback_used)
+    history.rhos_clipped = np.asarray(rhos_clipped)
+    history.predicted_decreases_safe = np.asarray(predicted_decreases_safe)
+    history.predicted_was_floored = np.asarray(predicted_was_floored)
+    history.rho_was_clipped = np.asarray(rho_was_clipped)
+    history.direction_types = np.asarray(direction_types, dtype=object)
+    history.trust_good_counts = np.asarray(trust_good_counts)
     return history
 
 
@@ -792,6 +910,10 @@ def run_case(case: BenchmarkCase) -> tuple[list[RunSummary], dict[tuple[int, str
             alpha_max=case.alpha_max,
             reject_bad_steps=True,
             max_backtracks=case.max_backtracks,
+            absolute_predicted_floor=case.absolute_predicted_floor,
+            relative_predicted_floor=case.relative_predicted_floor,
+            rho_clip_min=case.rho_clip_min,
+            rho_clip_max=case.rho_clip_max,
         )
         histories[(start_id, "controlled_raw_rho")] = raw
         rows.append(summarize_run(case, start_id, "controlled_raw_rho", x0, raw))
@@ -809,6 +931,10 @@ def run_case(case: BenchmarkCase) -> tuple[list[RunSummary], dict[tuple[int, str
             alpha_max=case.alpha_max,
             reject_bad_steps=True,
             max_backtracks=case.max_backtracks,
+            absolute_predicted_floor=case.absolute_predicted_floor,
+            relative_predicted_floor=case.relative_predicted_floor,
+            rho_clip_min=case.rho_clip_min,
+            rho_clip_max=case.rho_clip_max,
         )
         histories[(start_id, "controlled_ema_rho")] = ema
         rows.append(summarize_run(case, start_id, "controlled_ema_rho", x0, ema))
@@ -832,6 +958,12 @@ def run_case(case: BenchmarkCase) -> tuple[list[RunSummary], dict[tuple[int, str
             trust_region_rho_threshold=case.trust_region_rho_threshold,
             trust_region_alpha_threshold=case.trust_region_alpha_threshold,
             trust_region_expand_factor=case.trust_region_expand_factor,
+            trust_region_max_factor=case.trust_region_max_factor,
+            trust_region_patience=case.trust_region_patience,
+            absolute_predicted_floor=case.absolute_predicted_floor,
+            relative_predicted_floor=case.relative_predicted_floor,
+            rho_clip_min=case.rho_clip_min,
+            rho_clip_max=case.rho_clip_max,
         )
         histories[(start_id, "controlled_ema_trust")] = ema_trust
         rows.append(
@@ -1364,15 +1496,16 @@ def generate_report(
     lines.append("| Gradient descent | Raw gradient direction with the same fixed learning rate used as the function-level base alpha. |")
     lines.append("| Gradient descent + momentum | Classical velocity momentum gradient descent with momentum 0.9 and the same fixed learning rate. |")
     lines.append("| Vanilla Adam | Adam direction with a fixed global learning rate. |")
-    lines.append("| Controlled Adam (raw rho) | Adam direction, but the global multiplier is updated from the current actual/predicted decrease ratio. |")
+    lines.append("| Controlled Adam (raw rho) | Adam direction with a controlled global multiplier; if Adam momentum is non-descent, use a scaled negative-gradient fallback for that step. |")
     lines.append("| Controlled Adam (EMA rho) | Same as raw-rho, but the rho signal is smoothed before changing the global multiplier. |")
-    lines.append("| Controlled Adam (EMA + trust) | EMA-rho control plus a trust-region style expansion rule when rho is high and alpha is tiny. |")
+    lines.append("| Controlled Adam (EMA + trust) | EMA-rho control plus patience-based, hard-bounded trust-region expansion when rho is high and alpha is tiny. |")
     lines.append("")
     lines.append("The controlled ratio is:")
     lines.append("")
     lines.append("```text")
-    lines.append("rho_t = actual objective decrease / first-order predicted decrease")
-    lines.append("alpha_{t+1} = clip(alpha_t * exp(kp * (rho_signal - rho_star)))")
+    lines.append("rho_measured = actual objective decrease / floored first-order predicted decrease")
+    lines.append("rho_signal = clipped rho_measured, optionally EMA-smoothed")
+    lines.append("alpha_{t+1} = clip(alpha_used * exp(kp * (rho_signal - rho_star)))")
     lines.append("```")
     lines.append("")
     lines.append("For deterministic functions, both the before and after objective values are exact, so rho is not contaminated by minibatch noise.")
@@ -1425,7 +1558,7 @@ def generate_report(
     lines.append("")
     lines.append("- Start with `success_rate_by_objective.png` to show robustness across starts.")
     lines.append("- Use the trajectory and objective-curve plots to show where step-size control helps on anisotropic, curved, or scale-sensitive landscapes.")
-    lines.append("- Use alpha plots to explain that the controller changes only the global multiplier on top of the same Adam direction.")
+    lines.append("- Use alpha plots to explain that the controller primarily changes the global multiplier on top of Adam, with a scaled negative-gradient fallback when Adam momentum is locally non-descent.")
     lines.append("- Use the 3D surface plots to introduce the reported functions and their mathematical forms before discussing optimizer trajectories.")
     lines.append("")
     lines.append("Objective-level highlights from this run:")
@@ -1440,7 +1573,7 @@ def generate_report(
         lines.append("")
     lines.append("## Interpretation")
     lines.append("")
-    lines.append("- If controlled Adam has a higher success rate, the controller found a safer or more useful global step scale from the same Adam direction.")
+    lines.append("- If controlled Adam has a higher success rate, the controller found a safer or more useful global step scale from Adam-style directions, with fallback events preventing non-descent momentum skips.")
     lines.append("- If controlled Adam has a lower median best objective but similar success rate, it mainly improved convergence quality rather than basin selection.")
     lines.append("- If vanilla Adam wins on a function, that is expected on some landscapes: no controller can beat a well-chosen fixed learning rate everywhere.")
     lines.append("- If raw-rho is less stable than EMA-rho, the unsmoothed signal is reacting faster but with more variance.")
@@ -1535,15 +1668,16 @@ def generate_chinese_report(
     lines.append("| 梯度下降 | 原始梯度方向，使用与该函数 Adam 基准相同的固定基础学习率。 |")
     lines.append("| 动量梯度下降 | 经典速度动量梯度下降，动量系数为 0.9，并使用相同固定基础学习率。 |")
     lines.append("| 标准 Adam | Adam 方向，使用固定全局学习率。 |")
-    lines.append("| 受控 Adam（原始 rho） | Adam 方向不变，但根据当前实际下降量/一阶预测下降量的比例更新全局步长乘子。 |")
+    lines.append("| 受控 Adam（原始 rho） | 主要使用 Adam 方向并控制全局步长；如果 Adam 动量方向在当前梯度下不是下降方向，则使用等范数负梯度回退方向。 |")
     lines.append("| 受控 Adam（EMA 平滑 rho） | 与 raw-rho 相同，但先对 rho 做指数滑动平均，再更新全局步长乘子。 |")
-    lines.append("| 受控 Adam（EMA + 信赖域扩张） | 在 EMA-rho 控制器基础上，当 rho 很好且 alpha 已经很小时，使用类似信赖域的扩张规则。 |")
+    lines.append("| 受控 Adam（EMA + 信赖域扩张） | 在 EMA-rho 控制器基础上，当 rho 很好且 alpha 已经很小时，使用带耐心计数和硬上界的信赖域式扩张规则。 |")
     lines.append("")
     lines.append("控制比例为：")
     lines.append("")
     lines.append("```text")
-    lines.append("rho_t = 实际目标函数下降量 / 一阶预测下降量")
-    lines.append("alpha_{t+1} = clip(alpha_t * exp(kp * (rho_signal - rho_star)))")
+    lines.append("rho_measured = 实际目标函数下降量 / 带下界的一阶预测下降量")
+    lines.append("rho_signal = 裁剪后的 rho_measured，可选 EMA 平滑")
+    lines.append("alpha_{t+1} = clip(alpha_used * exp(kp * (rho_signal - rho_star)))")
     lines.append("```")
     lines.append("")
     lines.append("在这些确定性函数上，步前和步后的目标函数值都是精确计算的，因此 rho 不会受到 minibatch 随机噪声污染。")
@@ -1600,7 +1734,7 @@ def generate_chinese_report(
     lines.append("- 先用 `success_rate_by_objective.png` 展示不同初始点下的鲁棒性。")
     lines.append("- 先插入 3D 函数曲面图，向管理层说明每个被汇报函数的形状和数学形式。")
     lines.append("- 再用轨迹图和目标残差曲线展示：在各向异性、弯曲或尺度敏感地形上，步长控制为什么有帮助。")
-    lines.append("- 用 alpha 曲线说明：控制器并没有改变 Adam 的方向，只是在 Adam 方向外面调节一个全局步长乘子。")
+    lines.append("- 用 alpha 曲线说明：控制器主要在 Adam 方向外面调节全局步长；当 Adam 动量方向局部非下降时，会临时使用等范数负梯度回退方向。")
     lines.append("")
     lines.append("本次运行的目标级亮点：")
     lines.append("")
@@ -1614,7 +1748,7 @@ def generate_chinese_report(
         lines.append("")
     lines.append("## 如何解读")
     lines.append("")
-    lines.append("- 如果受控 Adam 的成功率更高，说明控制器从相同 Adam 方向中找到了更安全或更有效的全局步长尺度。")
+    lines.append("- 如果受控 Adam 的成功率更高，说明控制器在 Adam 风格方向上找到了更安全或更有效的全局步长尺度，同时回退机制避免了非下降动量直接跳过更新。")
     lines.append("- 如果成功率相近但受控 Adam 的历史最佳残差更低，说明它主要改善的是收敛质量，而不是进入哪个盆地。")
     lines.append("- 如果标准 Adam 在某个函数上领先，这是正常现象：任何控制器都不可能在所有地形上超过一个刚好调好的固定学习率。")
     lines.append("- raw-rho 反应最快，但可能更抖；EMA-rho 更平滑，但可能更保守。")
@@ -1794,6 +1928,13 @@ def write_config_csv(cases: list[BenchmarkCase], path: Path) -> None:
                 "trust_region_rho_threshold": case.trust_region_rho_threshold,
                 "trust_region_alpha_threshold": case.trust_region_alpha_threshold,
                 "trust_region_expand_factor": case.trust_region_expand_factor,
+                "trust_region_max_factor": case.trust_region_max_factor,
+                "trust_region_patience": case.trust_region_patience,
+                "max_backtracks": case.max_backtracks,
+                "absolute_predicted_floor": case.absolute_predicted_floor,
+                "relative_predicted_floor": case.relative_predicted_floor,
+                "rho_clip_min": case.rho_clip_min,
+                "rho_clip_max": case.rho_clip_max,
                 "description": case.description,
             }
         )
@@ -1816,6 +1957,13 @@ def write_config_csv(cases: list[BenchmarkCase], path: Path) -> None:
             "trust_region_rho_threshold",
             "trust_region_alpha_threshold",
             "trust_region_expand_factor",
+            "trust_region_max_factor",
+            "trust_region_patience",
+            "max_backtracks",
+            "absolute_predicted_floor",
+            "relative_predicted_floor",
+            "rho_clip_min",
+            "rho_clip_max",
             "description",
         ],
     )

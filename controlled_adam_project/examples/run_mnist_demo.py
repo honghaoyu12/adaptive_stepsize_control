@@ -721,7 +721,6 @@ def train_controlled_adam(
     epochs: int,
     alpha0: float,
     kp: float,
-    kp_down: float | None,
     rho_star: float,
     rho_beta: float,
     alpha_min: float,
@@ -737,16 +736,21 @@ def train_controlled_adam(
     reject_bad_steps: bool = True,
     run_name: str = "controlled_adam",
     checkpoint: CheckpointConfig | None = None,
-    max_backtracks: int = 3,
+    max_backtracks: int = 1,
     backtrack_shrink: float = 0.5,
     rho_min: float = 0.0,
+    absolute_predicted_floor: float = 1e-12,
+    relative_predicted_floor: float = 1e-8,
+    rho_clip_min: float = -1.0,
+    rho_clip_max: float = 3.0,
+    trust_region_max_factor: float = 1.5,
+    trust_region_patience: int = 2,
 ) -> tuple[list[EpochMetrics], list[ControlledAdamStep]]:
     """Train a model with same-minibatch controlled Adam."""
     optimizer = TorchControlledAdam(
         model.parameters(),
         alpha0=alpha0,
         kp=kp,
-        kp_down=kp_down,
         rho_star=rho_star,
         rho_min=rho_min,
         alpha_min=alpha_min,
@@ -759,9 +763,15 @@ def train_controlled_adam(
         trust_region_rho_threshold=trust_region_rho_threshold,
         trust_region_alpha_threshold=trust_region_alpha_threshold,
         trust_region_expand_factor=trust_region_expand_factor,
+        trust_region_max_factor=trust_region_max_factor,
+        trust_region_patience=trust_region_patience,
         reject_bad_steps=reject_bad_steps,
         max_backtracks=max_backtracks,
         backtrack_shrink=backtrack_shrink,
+        absolute_predicted_floor=absolute_predicted_floor,
+        relative_predicted_floor=relative_predicted_floor,
+        rho_clip_min=rho_clip_min,
+        rho_clip_max=rho_clip_max,
     )
     metrics = []
     step_logs = []
@@ -792,7 +802,9 @@ def train_controlled_adam(
 
         train_loss, train_accuracy = evaluate(model, eval_train_loader, criterion, device)
         test_loss, test_accuracy = evaluate(model, test_loader, criterion, device)
-        finite_rhos = [log.rho for log in epoch_logs if np.isfinite(log.rho)]
+        finite_rho_signals = [
+            log.rho_ema for log in epoch_logs if np.isfinite(log.rho_ema)
+        ]
         elapsed = time.perf_counter() - start_time
         metrics.append(
             EpochMetrics(
@@ -804,7 +816,11 @@ def train_controlled_adam(
                 elapsed_seconds=time.perf_counter() - run_start_time,
                 optimizer_steps=optimizer_steps,
                 mean_alpha=float(np.mean([log.alpha for log in epoch_logs])),
-                mean_rho=float(np.mean(finite_rhos)) if finite_rhos else float("nan"),
+                mean_rho=(
+                    float(np.mean(finite_rho_signals))
+                    if finite_rho_signals
+                    else float("nan")
+                ),
                 accepted_rate=float(np.mean([log.accepted for log in epoch_logs])),
             )
         )
@@ -818,6 +834,7 @@ def train_controlled_adam(
             optimizer_state={
                 "alpha": optimizer.alpha,
                 "rho_ema": optimizer.rho_ema,
+                "trust_good_count": optimizer.trust_good_count,
                 "step_count": optimizer.step_count,
                 "m": optimizer.m,
                 "v": optimizer.v,
@@ -882,7 +899,9 @@ def save_step_logs(
             "loss_after",
             "alpha",
             "rho",
+            "rho_clipped",
             "predicted_decrease",
+            "predicted_decrease_safe",
             "actual_decrease",
             "accepted",
             "descent_score",
@@ -891,6 +910,11 @@ def save_step_logs(
             "alpha_next",
             "alpha_update_factor",
             "trust_region_expanded",
+            "used_gradient_fallback",
+            "predicted_was_floored",
+            "rho_was_clipped",
+            "direction_type",
+            "trust_good_count",
         ]
         if optimizer_name is not None:
             header.insert(0, "optimizer")
@@ -902,7 +926,9 @@ def save_step_logs(
                 log.loss_after,
                 log.alpha,
                 log.rho,
+                log.rho_clipped,
                 log.predicted_decrease,
+                log.predicted_decrease_safe,
                 log.actual_decrease,
                 int(log.accepted),
                 log.descent_score,
@@ -911,6 +937,11 @@ def save_step_logs(
                 log.alpha_next,
                 log.alpha_update_factor,
                 int(log.trust_region_expanded),
+                int(log.used_gradient_fallback),
+                int(log.predicted_was_floored),
+                int(log.rho_was_clipped),
+                log.direction_type,
+                log.trust_good_count,
             ]
             if optimizer_name is not None:
                 row.insert(0, optimizer_name)
@@ -929,7 +960,6 @@ def optimizer_variant_specs(args: argparse.Namespace) -> list[dict[str, object]]
         "direction": "Adam moments with same-minibatch actual/predicted controller",
         "alpha0": args.lr,
         "kp": args.controlled_kp,
-        "kp_down": args.controlled_kp_down,
         "rho_star": args.controlled_rho_star,
         "rho_beta": args.controlled_rho_beta,
         "alpha_min": args.controlled_alpha_min,
@@ -940,7 +970,15 @@ def optimizer_variant_specs(args: argparse.Namespace) -> list[dict[str, object]]
         "trust_region_rho_threshold": args.controlled_trust_rho_threshold,
         "trust_region_alpha_threshold": args.controlled_trust_alpha_threshold,
         "trust_region_expand_factor": args.controlled_trust_expand_factor,
-        "max_backtracks": 3,
+        "trust_region_max_factor": args.controlled_trust_max_factor,
+        "trust_region_patience": args.controlled_trust_patience,
+        "max_backtracks": args.controlled_max_backtracks,
+        "backtrack_shrink": args.controlled_backtrack_shrink,
+        "rho_min": args.controlled_rho_min,
+        "absolute_predicted_floor": args.controlled_absolute_predicted_floor,
+        "relative_predicted_floor": args.controlled_relative_predicted_floor,
+        "rho_clip_min": args.controlled_rho_clip_min,
+        "rho_clip_max": args.controlled_rho_clip_max,
         "same_minibatch_trial_loss": True,
     }
     specs = {
@@ -1276,7 +1314,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--controlled-kp", type=float, default=0.05)
-    parser.add_argument("--controlled-kp-down", type=float)
     parser.add_argument("--controlled-rho-star", type=float, default=0.7)
     parser.add_argument("--controlled-rho-beta", type=float, default=0.9)
     parser.add_argument("--controlled-alpha-min", type=float, default=1e-5)
@@ -1291,6 +1328,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--controlled-trust-rho-threshold", type=float, default=0.9)
     parser.add_argument("--controlled-trust-alpha-threshold", type=float, default=1e-4)
     parser.add_argument("--controlled-trust-expand-factor", type=float, default=1.5)
+    parser.add_argument("--controlled-trust-max-factor", type=float, default=1.5)
+    parser.add_argument("--controlled-trust-patience", type=int, default=2)
+    parser.add_argument("--controlled-max-backtracks", type=int, default=1)
+    parser.add_argument("--controlled-backtrack-shrink", type=float, default=0.5)
+    parser.add_argument("--controlled-rho-min", type=float, default=0.0)
+    parser.add_argument("--controlled-absolute-predicted-floor", type=float, default=1e-12)
+    parser.add_argument("--controlled-relative-predicted-floor", type=float, default=1e-8)
+    parser.add_argument("--controlled-rho-clip-min", type=float, default=-1.0)
+    parser.add_argument("--controlled-rho-clip-max", type=float, default=3.0)
     parser.add_argument(
         "--ablation",
         action="store_true",
@@ -1350,7 +1396,6 @@ def run_controlled_variant(
     trust_region_expand: bool,
     use_rho_ema: bool,
     reject_bad_steps: bool,
-    kp_down: float | None = None,
     alpha_min: float | None = None,
     alpha_max: float | None = None,
     checkpoint: CheckpointConfig | None = None,
@@ -1369,7 +1414,6 @@ def run_controlled_variant(
         args.epochs,
         alpha0,
         kp,
-        kp_down,
         args.controlled_rho_star,
         rho_beta,
         args.controlled_alpha_min if alpha_min is None else alpha_min,
@@ -1385,6 +1429,15 @@ def run_controlled_variant(
         reject_bad_steps=reject_bad_steps,
         run_name=name,
         checkpoint=checkpoint,
+        max_backtracks=args.controlled_max_backtracks,
+        backtrack_shrink=args.controlled_backtrack_shrink,
+        rho_min=args.controlled_rho_min,
+        absolute_predicted_floor=args.controlled_absolute_predicted_floor,
+        relative_predicted_floor=args.controlled_relative_predicted_floor,
+        rho_clip_min=args.controlled_rho_clip_min,
+        rho_clip_max=args.controlled_rho_clip_max,
+        trust_region_max_factor=args.controlled_trust_max_factor,
+        trust_region_patience=args.controlled_trust_patience,
     )
     return OptimizerRun(name, metrics, step_logs)
 
@@ -1487,7 +1540,6 @@ def main() -> None:
                 dataset_name,
                 alpha0=args.lr,
                 kp=args.controlled_kp,
-                kp_down=args.controlled_kp_down,
                 rho_beta=0.0,
                 min_alpha_factor=args.controlled_min_alpha_factor,
                 max_alpha_factor=args.controlled_max_alpha_factor,
@@ -1511,7 +1563,6 @@ def main() -> None:
                 dataset_name,
                 alpha0=args.lr,
                 kp=args.controlled_kp,
-                kp_down=args.controlled_kp_down,
                 rho_beta=args.controlled_rho_beta,
                 min_alpha_factor=args.controlled_min_alpha_factor,
                 max_alpha_factor=args.controlled_max_alpha_factor,
@@ -1535,7 +1586,6 @@ def main() -> None:
                 dataset_name,
                 alpha0=args.lr,
                 kp=args.controlled_kp,
-                kp_down=args.controlled_kp_down,
                 rho_beta=args.controlled_rho_beta,
                 min_alpha_factor=args.controlled_min_alpha_factor,
                 max_alpha_factor=args.controlled_max_alpha_factor,
@@ -1559,7 +1609,6 @@ def main() -> None:
                 dataset_name,
                 alpha0=args.lr,
                 kp=args.controlled_kp,
-                kp_down=args.controlled_kp_down,
                 rho_beta=args.controlled_rho_beta,
                 min_alpha_factor=args.controlled_min_alpha_factor,
                 max_alpha_factor=args.controlled_max_alpha_factor,

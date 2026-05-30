@@ -7,6 +7,16 @@ the Adam and Muon subprojects:
 - `controlled_ema`
 - `controlled_ema_trust`
 
+Status note: this is now a general/legacy controller note. For the current
+controlled Adam implementation, use
+`controlled_adam_project/CONTROLLED_ADAM_ALGORITHM.md` as authoritative. The
+Adam v5.1 implementation differs from the older description below by using a
+norm-matched negative-gradient fallback for non-descent Adam momentum
+directions, flooring tiny predicted decreases, clipping rho before
+EMA/controller updates, preventing fully rejected trial sequences from
+increasing alpha, defaulting to one backtracking reduction, and making trust
+expansion patience-based with a hard bound.
+
 The key point is that each training step has three separate stages:
 
 1. Choose a direction using a base optimizer such as Adam or Muon.

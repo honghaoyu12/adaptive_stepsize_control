@@ -418,9 +418,10 @@ subset clarified the alpha-control behavior:
   `alpha_max=1.5e-3` to `1.75e-3`; EMA's best single-seed endpoint in that
   sweep was `0.7355` at `alpha_max=2.25e-3`.
 - Raising `rho_star` to `0.85` made alpha self-limiting and prevented cap
-  saturation, but was too conservative for the 20-epoch run. Adding asymmetric
-  downward gain via `--controlled-kp-down 0.08` delayed saturation but did not
-  improve accuracy.
+  saturation, but was too conservative for the 20-epoch run. A historical
+  asymmetric downward-gain test delayed saturation but did not improve
+  accuracy, so the active controlled Adam code now exposes only the single
+  proportional gain `kp`.
 
 The detailed reports are under:
 
@@ -431,7 +432,19 @@ outputs/cifar10_resnet_adam_rhostar_asym_gain_seed123/
 ```
 
 The current controlled Adam mechanics are written in paper-style pseudocode in
-`controlled_adam_project/CONTROLLED_ADAM_ALGORITHM.md`.
+`controlled_adam_project/CONTROLLED_ADAM_ALGORITHM.md`. The simplified note
+uses a norm-matched negative-gradient fallback for non-descent Adam momentum
+directions, floors tiny predicted decreases before rho division, clips rho
+before the single-gain alpha update, and prevents rejected trial sequences from
+increasing alpha.
+
+The note also records the current interpretation of the controller. Backtracking
+is a current-step accept/retry mechanism; the alpha controller is a next-step
+multiplier update. A trial step can therefore be accepted while still causing
+the next `alpha` to decrease if the same-minibatch loss went down but the
+actual decrease was weaker than the target ratio. The active controller exposes
+one proportional gain, `kp`; the earlier separate downward-gain experiment was
+removed because it added tuning complexity without improving the CIFAR result.
 
 For minibatch training, the control ratio evaluates the trial loss on the
 **same minibatch** used to compute the gradient:

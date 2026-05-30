@@ -425,15 +425,20 @@ def write_metadata(
             "rho_star": args.controlled_rho_star,
             "rho_beta": args.controlled_rho_beta,
             "kp": args.controlled_kp,
-            "kp_down": args.controlled_kp_down,
             "min_alpha_factor": args.controlled_min_alpha_factor,
             "max_alpha_factor": args.controlled_max_alpha_factor,
             "trust_region_rho_threshold": args.controlled_trust_rho_threshold,
             "trust_region_alpha_threshold": args.controlled_trust_alpha_threshold,
             "trust_region_expand_factor": args.controlled_trust_expand_factor,
+            "trust_region_max_factor": args.controlled_trust_max_factor,
+            "trust_region_patience": args.controlled_trust_patience,
             "max_backtracks": args.controlled_max_backtracks,
             "backtrack_shrink": args.controlled_backtrack_shrink,
             "rho_min": args.controlled_rho_min,
+            "absolute_predicted_floor": args.controlled_absolute_predicted_floor,
+            "relative_predicted_floor": args.controlled_relative_predicted_floor,
+            "rho_clip_min": args.controlled_rho_clip_min,
+            "rho_clip_max": args.controlled_rho_clip_max,
         },
         "delayed_adam": {
             name: delayed_configs[name].__dict__
@@ -474,7 +479,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--print-every", type=int, default=1)
 
     parser.add_argument("--controlled-kp", type=float, default=0.02)
-    parser.add_argument("--controlled-kp-down", type=float)
     parser.add_argument("--controlled-rho-star", type=float, default=0.80)
     parser.add_argument("--controlled-rho-beta", type=float, default=0.90)
     parser.add_argument("--controlled-alpha-min", type=float, default=1e-3)
@@ -484,9 +488,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--controlled-trust-rho-threshold", type=float, default=0.90)
     parser.add_argument("--controlled-trust-alpha-threshold", type=float, default=1.05e-3)
     parser.add_argument("--controlled-trust-expand-factor", type=float, default=1.10)
-    parser.add_argument("--controlled-max-backtracks", type=int, default=3)
+    parser.add_argument("--controlled-trust-max-factor", type=float, default=1.10)
+    parser.add_argument("--controlled-trust-patience", type=int, default=2)
+    parser.add_argument("--controlled-max-backtracks", type=int, default=1)
     parser.add_argument("--controlled-backtrack-shrink", type=float, default=0.5)
     parser.add_argument("--controlled-rho-min", type=float, default=0.0)
+    parser.add_argument("--controlled-absolute-predicted-floor", type=float, default=1e-12)
+    parser.add_argument("--controlled-relative-predicted-floor", type=float, default=1e-8)
+    parser.add_argument("--controlled-rho-clip-min", type=float, default=-1.0)
+    parser.add_argument("--controlled-rho-clip-max", type=float, default=3.0)
     parser.add_argument(
         "--delayed-decoupled-weight-decay",
         action=argparse.BooleanOptionalAction,
@@ -561,7 +571,6 @@ def main() -> None:
                 args.epochs,
                 args.lr,
                 args.controlled_kp,
-                args.controlled_kp_down,
                 args.controlled_rho_star,
                 args.controlled_rho_beta if use_rho_ema else 0.0,
                 args.controlled_alpha_min,
@@ -580,6 +589,12 @@ def main() -> None:
                 max_backtracks=args.controlled_max_backtracks,
                 backtrack_shrink=args.controlled_backtrack_shrink,
                 rho_min=args.controlled_rho_min,
+                absolute_predicted_floor=args.controlled_absolute_predicted_floor,
+                relative_predicted_floor=args.controlled_relative_predicted_floor,
+                rho_clip_min=args.controlled_rho_clip_min,
+                rho_clip_max=args.controlled_rho_clip_max,
+                trust_region_max_factor=args.controlled_trust_max_factor,
+                trust_region_patience=args.controlled_trust_patience,
             )
             runs.append(image_base.OptimizerRun(variant, metrics, step_logs))
             image_base.save_step_logs(

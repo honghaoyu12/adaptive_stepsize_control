@@ -1,6 +1,6 @@
 # Project Handoff: Adaptive Step-Size Control
 
-Last updated: 2026-05-29
+Last updated: 2026-05-30
 
 This document is for a future coding agent taking over the workspace. It is intentionally comprehensive and operational: it explains what the project is, what has been implemented, how to run it, what benchmark results are already known, and what caveats matter.
 
@@ -32,9 +32,10 @@ Supporting documents and how to treat them:
 - `RAW_RHO_CONTROLLED_OPTIMIZER_ALGORITHM.md`: algorithm note for raw-rho,
   EMA-rho, and EMA+trust controller mechanics.
 - `controlled_adam_project/CONTROLLED_ADAM_ALGORITHM.md`: paper-style
-  description of the currently implemented minibatch controlled Adam algorithm,
-  including same-minibatch trial evaluation, backtracking, rho EMA,
-  trust-region expansion, and optional asymmetric `kp_down`.
+  annotated description of the simplified minibatch controlled Adam algorithm,
+  including same-minibatch trial evaluation, one-step default backtracking,
+  norm-matched gradient fallback, rho flooring/clipping, and a single
+  symmetric `kp` gain.
 - `NEXT_BENCHMARK_PLAN.md`: current neural-network benchmark planning note.
 - `OPTIMIZER_IMPLEMENTATION_AUDIT.md`: implementation audit for AdamW/Muon
   alignment and intentional differences.
@@ -139,20 +140,19 @@ under ignored output directories and can be regenerated.
 
 ## Moving This Workspace To A More Powerful Computer
 
-Important: a plain `git clone` is not enough unless the current dirty worktree
-is committed first. As of 2026-05-29, several important code/documentation
-changes and whole subprojects are still uncommitted or untracked. If the user
-wants the stronger machine to continue exactly from this state, either commit
-the work first or copy the entire working tree, including untracked files,
-ignored outputs, and local datasets.
+Important: a plain `git clone` is enough for tracked code only if the latest
+local commits are pushed or otherwise transferred. The delayed-feedback
+subprojects are now tracked, but there are still local documentation/code edits,
+ignored outputs, datasets, and user-provided artifacts that git will not carry
+unless they are committed or copied separately.
 
 Minimum transfer checklist:
 
 ```text
 tracked git files
 uncommitted modified files
-untracked subprojects: delayed_feedback_adam/, delayed_feedback_muon/
-untracked controlled Adam sweep/report scripts
+tracked subprojects: delayed_feedback_adam/, delayed_feedback_muon/
+untracked/generated report artifacts
 root outputs/ with recent CIFAR and function benchmark reports
 controlled_adam_project/data/ with CIFAR-10 and MNIST/Fashion-MNIST caches
 fashion/ and mnist/ local IDX gzip folders, if present
@@ -229,20 +229,22 @@ if the new agent should analyze existing results instead of rerunning.
 The latest project update was committed locally in:
 
 ```text
-12a12df Add PCA trajectory visualization for Adam checkpoints
+73c967f Add delayed feedback optimizers and controlled Adam diagnostics
 ```
 
 Recent commits before it include:
 
 ```text
+12a12df Add PCA trajectory visualization for Adam checkpoints
 87af501 Refresh project documentation state
 9c55036 Add PI optimizers and align Muon implementation
 ```
 
-Together these commits added the PI Adam and PI Muon subprojects, aligned the
-neural Muon implementations with official `torch.optim.Muon` behavior, updated
-the audit and project-memory documents, archived older experimental outputs,
-and added the Adam checkpoint PCA trajectory post-processor.
+Together these commits added the delayed-feedback Adam/Muon subprojects, added
+controlled Adam diagnostics, added the PI Adam and PI Muon subprojects, aligned
+the neural Muon implementations with official `torch.optim.Muon` behavior,
+updated the audit and project-memory documents, archived older experimental
+outputs, and added the Adam checkpoint PCA trajectory post-processor.
 
 At the time of this handoff, the workspace is not clean. Preserve these local
 changes and generated artifacts unless the user explicitly asks to remove or
@@ -259,10 +261,9 @@ controlled_adam_project/src/controlled_adam/torch_optimizers.py
 controlled_adam_project/src/controlled_adam/optimizers.py
 controlled_adam_project/examples/run_mnist_demo.py
 delayed_feedback_adam/examples/run_cifar_resnet_adam_comparison.py
-delayed_feedback_adam/
-delayed_feedback_muon/
 controlled_adam_project/examples/run_controlled_adam_*_sweep.py
 controlled_adam_project/examples/run_function_benchmark_tuned_simplified_report.py
+controlled_adam_production_fix_plan_v5.md
 fashionmnist_20epoch_metrics.png
 fashionmnist_20epoch_metrics.summary.csv
 scheduled_iterate_muon_academic_report.pdf
@@ -494,11 +495,24 @@ Latest same-step controlled Adam ResNet controller diagnostics:
   adaptive average pooling, and a `64 -> 10` linear head. Each block is
   `Conv3x3 -> BatchNorm -> ReLU -> Conv3x3 -> BatchNorm` plus identity or
   projection skip. Parameter count: `175258`.
-- The full current controlled Adam algorithm is now documented in
-  `controlled_adam_project/CONTROLLED_ADAM_ALGORITHM.md`. That note matches
-  the PyTorch implementation, including the detail that if every trial step is
-  rejected, parameters are restored but Adam's moment state has still consumed
-  the minibatch gradient.
+- The simplified controlled Adam algorithm is now documented in
+  `controlled_adam_project/CONTROLLED_ADAM_ALGORITHM.md`. That note focuses on
+  the scaled negative-gradient fallback, same-minibatch trial evaluation,
+  backtracking, floored predicted decreases, clipped rho, the single-gain alpha
+  controller, and the rule that full-rejection sequences cannot increase alpha.
+  If every trial step is rejected, parameters are restored but Adam's moment
+  state has still consumed the minibatch gradient.
+- In that note, backtracking and alpha control have separate roles.
+  Backtracking decides whether to keep the current trial step. The alpha
+  controller decides the multiplier for the next minibatch. Therefore a step can
+  be accepted without backtracking and still lower the next alpha if the
+  accepted loss decrease is positive but weaker than the target rho.
+- The controller intentionally clips at three levels: the predicted-decrease
+  denominator is floored before division, rho is clipped before controlling
+  alpha, and the multiplicative alpha factor plus final alpha are bounded. The
+  first guard avoids division by tiny predictions, the second prevents outlier
+  minibatches from dominating the next alpha, and the last two keep the alpha
+  trajectory gradual and within the configured search range.
 - High-LR/high-cap backtracking sweep:
   `outputs/cifar10_resnet_adam_backtracking_sweep_highlr2e3_cap2p5e3_seed123/`.
   Setup: 10k/2k CIFAR-10, 20 epochs, seed `123`, `lr=2e-3`,
@@ -525,19 +539,18 @@ alpha_max   controlled_raw_rho   controlled_ema
   best around `1.5e-3` to `1.75e-3`; EMA liked more cap on this single seed.
   This means cap saturation is not intrinsically bad, but the current
   same-step rho target does not discover an interior alpha optimum by itself.
-- Added optional asymmetric gain support to controlled Adam:
-  `TorchControlledAdam(..., kp_down=...)` and
-  `--controlled-kp-down` in the CIFAR comparison CLI. If omitted,
-  `kp_down=kp`, so old behavior is unchanged. The controller now uses `kp` for
-  `rho_control >= rho_star` and `kp_down` for `rho_control < rho_star`.
+- Removed the optional asymmetric decrease gain from active controlled Adam.
+  The current implementation exposes only `kp`; the same gain controls both
+  alpha increases and decreases.
 - Raised-target / asymmetric-gain test:
   `outputs/cifar10_resnet_adam_rhostar_asym_gain_seed123/`. With
   `alpha_max=2.25e-3`, `rho_star=0.85` prevented cap saturation but was too
   conservative: raw-rho final `0.7115`, EMA final `0.6980`. With
-  `rho_star=0.80`, `kp_down=0.08`, saturation was delayed but not removed:
-  raw-rho final `0.6950`, EMA final `0.7330`. The most sensible next setting
-  is the middle ground `rho_star=0.825`, `kp_down=0.04` or `0.06`,
-  `alpha_max=2.25e-3`.
+  the historical asymmetric downward-gain test, saturation was delayed but not
+  removed: raw-rho final `0.6950`, EMA final `0.7330`. Because it did not
+  improve accuracy and added tuning complexity, that extra gain was removed.
+  Future tuning should adjust `rho_star`, `kp`, alpha bounds, factor bounds,
+  backtracking, and trust settings.
 
 There are also user-provided/untracked comparison/report artifacts at repo root:
 
@@ -752,19 +765,29 @@ The PyTorch runner supports:
 
 - same-minibatch trial loss evaluation
 - bad-step rejection
-- backtracking
-- non-descent shrink
+- configurable backtracking with default `max_backtracks=1`
+- scaled negative-gradient fallback for non-descent Adam momentum directions
+- non-descent shrink only for degenerate zero-gradient/zero-direction cases
+- predicted-decrease flooring before rho division
+- measured rho for acceptance, clipped rho for EMA/controller updates
+- no alpha increase after a fully rejected trial sequence
+- single-gain control: only `kp` is exposed; the removed `kp_down` experiment
+  should be treated as historical
 - EMA-smoothed rho control
 - clipped alpha update factors
-- trust-region style alpha recovery
-- diagnostics: `alpha_next`, `alpha_update_factor`, `trust_region_expanded`
+- patience-based trust-region style alpha recovery with a hard expansion bound
+- diagnostics: `alpha_next`, `alpha_update_factor`,
+  `trust_region_expanded`, `used_gradient_fallback`, `rho_clipped`,
+  `predicted_decrease_safe`, `predicted_was_floored`, `rho_was_clipped`,
+  `direction_type`, `trust_good_count`
 
 Trust-region recovery rule:
 
 - If a step is accepted without backtracking,
 - and the smoothed rho is high,
 - and alpha is tiny,
-- then force a larger expansion factor.
+- and this high-quality signal persists for `trust_region_patience` steps,
+- then force a larger expansion factor capped by `trust_region_max_factor`.
 
 This was added because alpha sometimes collapsed to very small values while rho became high, which means the local model was too conservative rather than the optimizer being done.
 
@@ -933,6 +956,7 @@ rho_star_delta = -0.2
 rho_beta = 0.90
 trust_region_rho_threshold = 0.60
 trust_region_expand_factor = 3
+trust_region_max_factor = 3
 alpha_min = 0.01 * alpha0
 alpha_max = 50 * alpha0
 trust_region_alpha_threshold = 3 * alpha0
@@ -1638,13 +1662,13 @@ On another machine, either copy this folder or run the Adam/Muon runner with `--
 ## Recommended Next Steps For The Next Agent
 
 1. Run the next compact same-step controlled Adam ResNet controller test:
-   `rho_star=0.825`, `kp=0.02`, `kp_down=0.04` and/or `0.06`,
-   `alpha_max=2.25e-3`, variants `controlled_raw_rho` and `controlled_ema`,
-   on the same 10k/2k, 20-epoch, seed-123 CIFAR ResNet setup. This tests the
-   middle ground between permissive `rho_star=0.80` cap saturation and
-   over-conservative `rho_star=0.85` floor-hugging.
+   `rho_star=0.825`, `kp=0.02`, `alpha_max=2.25e-3`, variants
+   `controlled_raw_rho` and `controlled_ema`, on the same 10k/2k, 20-epoch,
+   seed-123 CIFAR ResNet setup. This tests the middle ground between
+   permissive `rho_star=0.80` cap saturation and over-conservative
+   `rho_star=0.85` floor-hugging using the simplified single-gain controller.
 
-   Example command for `kp_down=0.04`:
+   Example command:
 
 ```bash
 MPLCONFIGDIR=/tmp python3 delayed_feedback_adam/examples/run_cifar_resnet_adam_comparison.py \
@@ -1658,10 +1682,10 @@ MPLCONFIGDIR=/tmp python3 delayed_feedback_adam/examples/run_cifar_resnet_adam_c
   --controlled-rho-star 0.825 \
   --controlled-rho-beta 0.90 \
   --controlled-kp 0.02 \
-  --controlled-kp-down 0.04 \
   --controlled-min-alpha-factor 0.98 \
   --controlled-max-alpha-factor 1.015 \
-  --output-dir outputs/cifar10_resnet_adam_rhostar0p825_kpdown0p04_cap2p25e3_lr1e3_10k_2k_20epoch_seed123 \
+  --controlled-max-backtracks 1 \
+  --output-dir outputs/cifar10_resnet_adam_rhostar0p825_kp0p02_cap2p25e3_lr1e3_10k_2k_20epoch_seed123 \
   --print-every 1 \
   --checkpoint-every 5 \
   --variants controlled_raw_rho controlled_ema
@@ -1779,7 +1803,7 @@ cd ../pi_muon_optimizer
 python test_pi_muon.py
 ```
 
-Controlled Adam syntax check after the recent `kp_down` addition:
+Controlled Adam syntax check after the recent single-gain controller update:
 
 ```bash
 python3 -m py_compile \

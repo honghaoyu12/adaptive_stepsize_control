@@ -55,15 +55,16 @@ The Adam suite compares four optimizers:
 | Optimizer | Meaning |
 |---|---|
 | Vanilla Adam | Adam with a fixed global learning rate. |
-| Controlled Adam, raw rho | Adam direction plus a global multiplier updated from the current actual/predicted decrease ratio. |
+| Controlled Adam, raw rho | Adam-style direction plus a global multiplier updated from the current actual/predicted decrease ratio. Non-descent Adam momentum uses the norm-matched negative-gradient fallback. |
 | Controlled Adam, EMA rho | Same controller, but the rho signal is smoothed before changing the global multiplier. |
-| Controlled Adam, EMA + trust | EMA-rho controller plus the trust-region style tiny-alpha expansion hook used in the neural-network benchmarks. |
+| Controlled Adam, EMA + trust | EMA-rho controller plus the patience-based, hard-bounded trust-region style tiny-alpha expansion hook used in the neural-network benchmarks. |
 
 The controller uses:
 
 ```text
-rho_t = actual decrease / first-order predicted decrease
-alpha_{t+1} = clip(alpha_t * exp(kp * (rho_signal - rho_star)))
+rho_measured = actual decrease / floored first-order predicted decrease
+rho_signal = clipped rho_measured, optionally EMA-smoothed
+alpha_{t+1} = clip(alpha_used * exp(kp * (rho_signal - rho_star)))
 ```
 
 For these deterministic functions, the before-step and after-step objective
@@ -414,6 +415,7 @@ rho_star_delta = -0.2
 rho_beta = 0.90
 trust_region_rho_threshold = 0.60
 trust_region_expand_factor = 3
+trust_region_max_factor = 3
 alpha_min = 0.01 * alpha0
 alpha_max = 50 * alpha0
 trust_region_alpha_threshold = 3 * alpha0
@@ -777,8 +779,9 @@ Suggested story:
    control helps on curved, steep, or scale-sensitive landscapes.
 3. Use Rastrigin or Ackley to be honest about limitations: a local optimizer can
    still settle in a local basin.
-4. Use alpha curves to show that the controller is changing only the scalar
-   global multiplier on top of the same Adam direction.
+4. Use alpha curves to show that the controller mainly changes the scalar
+   global multiplier on top of Adam-style directions, with a norm-matched
+   negative-gradient fallback when Adam momentum is locally non-descent.
 5. If Rastrigin is shown, prefer the dedicated basin plot
    `rastrigin_success_rate_by_radius.png` rather than implying that any local
    optimizer solves the full multi-modal problem from arbitrary starts.

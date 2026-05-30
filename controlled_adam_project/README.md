@@ -5,9 +5,15 @@ This project compares **vanilla Adam** with an **outer-loop controlled Adam** op
 The key idea is that Adam chooses a preconditioned search direction, while an outer feedback controller chooses the global step length by comparing the **actual objective decrease** with the **first-order predicted decrease**.
 
 For a paper-style description of the implemented minibatch controlled Adam
-algorithm, including backtracking, same-minibatch trial evaluation, raw-rho
-versus EMA-rho control, trust expansion, and optional asymmetric `kp_down`, see
-`CONTROLLED_ADAM_ALGORITHM.md`.
+algorithm, including same-minibatch trial evaluation, norm-matched gradient
+fallback, rho flooring/clipping, default one-step backtracking, and the
+single-gain `kp` controller, see `CONTROLLED_ADAM_ALGORITHM.md`.
+
+That algorithm note intentionally presents the simplified raw controller core.
+The PyTorch optimizer still exposes EMA-rho and trust-recovery variants for
+experiments, but the current default mental model should be: Adam chooses the
+direction, the controller chooses one scalar `alpha`, and `kp` is the only
+proportional gain.
 
 ---
 
@@ -747,17 +753,15 @@ Recent CIFAR-10 observations:
   `2.25e-3` (`0.7355`). This means cap saturation is not inherently wrong, but
   the same-step rho target did not discover an interior alpha optimum by
   itself. See `outputs/cifar10_resnet_adam_cap_sweep_lr1e3_seed123/`.
-- Added optional asymmetric gain support: `TorchControlledAdam(...,
-  kp_down=...)` and the CIFAR CLI flag `--controlled-kp-down`. If omitted,
-  `kp_down` defaults to `kp`, preserving old behavior. The update uses `kp`
-  when `rho_control >= rho_star` and `kp_down` when
-  `rho_control < rho_star`.
+- Removed the optional asymmetric decrease gain from the active controller.
+  Controlled Adam now exposes only `kp`; the same proportional gain controls
+  both alpha increases and alpha decreases.
 - Testing `rho_star=0.85` prevented cap saturation but was too conservative:
-  final accuracy was raw-rho `0.7115`, EMA `0.6980`. Testing
-  `rho_star=0.80`, `kp_down=0.08` delayed saturation but did not improve
-  accuracy: raw-rho `0.6950`, EMA `0.7330`. The next sensible middle ground is
-  `rho_star=0.825` with `kp_down=0.04` or `0.06` at
-  `alpha_max=2.25e-3`. See
+  final accuracy was raw-rho `0.7115`, EMA `0.6980`. A historical asymmetric
+  downward-gain test delayed saturation but did not improve accuracy, so that
+  extra parameter was removed from the current code. Future tuning should use
+  `rho_star`, `kp`, alpha bounds, factor bounds, backtracking, and trust
+  settings rather than a separate downward gain. See
   `outputs/cifar10_resnet_adam_rhostar_asym_gain_seed123/`.
 - Each benchmark output directory now includes `run_metadata.json` and
   `run_metadata.txt` with the dataset, transforms, model architecture,
@@ -829,17 +833,21 @@ The controlled Adam minibatch step is:
 4. Use Adam's moment estimates to construct the direction `p_t`.
 5. Compute the first-order predicted decrease
    `predicted = -alpha_t * grad^T p_t`.
-6. Take a trial step to `theta_trial = theta_t + alpha_t p_t`.
-7. Recompute `loss_after = f_Bt(theta_trial)` on the **same minibatch**.
-8. Compute `actual = loss_before - loss_after` and
-   `rho = actual / predicted`.
-9. Update the optional `rho` EMA.
-10. Accept or reject the trial step, then update `alpha_t` with a clipped
-    multiplicative factor. If `kp_down` is set, the controller uses `kp` for
-    upward moves (`rho_control >= rho_star`) and `kp_down` for downward moves
-    (`rho_control < rho_star`).
-11. If enabled, apply the trust-region recovery rule when an accepted,
-    non-backtracked step has high smoothed `rho` and tiny `alpha_t`.
+6. If Adam's momentum direction is non-descent for this minibatch, replace it
+   with `-grad` rescaled to the Adam-direction norm before evaluating the
+   trial step.
+7. Take a trial step to `theta_trial = theta_t + alpha_t p_t`.
+8. Recompute `loss_after = f_Bt(theta_trial)` on the **same minibatch**.
+9. Compute `actual = loss_before - loss_after` and
+   a measured rho using a floored denominator. The measured rho is used for
+   accept/reject, while a clipped rho is used for EMA/controller updates.
+10. Update the optional `rho` EMA from the clipped rho.
+11. Accept or reject the trial step, then update `alpha_t` with a clipped
+    multiplicative factor using the single gain `kp`. A fully rejected trial
+    sequence cannot increase the next alpha.
+12. If enabled, apply the trust-region recovery rule when an accepted,
+    non-backtracked step has high smoothed `rho` for enough consecutive steps
+    and tiny `alpha_t`.
 
 This requires one extra forward pass per minibatch, plus parameter rollback when
 a step is rejected. For a fair comparison with vanilla Adam, the MNIST
@@ -852,12 +860,23 @@ experiment uses:
 - logged train loss, train accuracy, test accuracy, alpha, rho, and accepted
   step rate.
 
+Backtracking and alpha control answer different questions. Backtracking asks
+whether the current trial step should be kept or retried at a smaller
+same-minibatch alpha. The alpha controller asks how large the next minibatch's
+alpha should be. Thus an accepted trial step can still reduce the next alpha
+when it lowered the same-minibatch loss but produced a ratio below `rho_star`.
+
+The clipping layers are also separate. The predicted-decrease floor prevents
+division by a near-zero denominator, rho clipping prevents one noisy minibatch
+from creating an extreme alpha update, factor clipping limits how abruptly
+alpha can change from one accepted/rejected trial sequence, and alpha clipping
+keeps the final value inside the configured operating range.
+
 The default neural-network controller settings are:
 
 ```text
 rho_beta = 0.9
 kp = 0.05
-kp_down = None  # defaults to kp; set larger than kp for stronger decreases
 rho_star = 0.7
 alpha_min = 1e-5
 alpha_max = 5e-2
@@ -867,6 +886,14 @@ trust_region_expand = True
 trust_region_rho_threshold = 0.9
 trust_region_alpha_threshold = 1e-4
 trust_region_expand_factor = 1.5
+trust_region_max_factor = 1.5
+trust_region_patience = 2
+max_backtracks = 1
+backtrack_shrink = 0.5
+absolute_predicted_floor = 1e-12
+relative_predicted_floor = 1e-8
+rho_clip_min = -1.0
+rho_clip_max = 3.0
 ```
 
 ### Interpreting rho when alpha is tiny
@@ -910,13 +937,15 @@ while learning may have stalled. Future controller variants should consider
 progress magnitude, alpha recovery rules, or treating tiny predicted/actual
 decreases as an uninformative ratio.
 
-The current PyTorch implementation uses a first recovery rule for this case:
+The current PyTorch implementation uses a bounded recovery rule for this case:
 when `rho_ema >= trust_region_rho_threshold`, `alpha_t <=
-trust_region_alpha_threshold`, and the accepted trial step did not require
-backtracking, the next-alpha multiplier is at least
-`trust_region_expand_factor`. This mirrors classical trust-region logic:
-expand the radius only when the local model is reliable and the step appears to
-be limited by the current radius.
+trust_region_alpha_threshold`, the accepted trial step did not require
+backtracking, and this high-quality signal has persisted for
+`trust_region_patience` consecutive non-backtracked accepted steps, the
+next-alpha multiplier is at least `trust_region_expand_factor` and at most
+`trust_region_max_factor`. This mirrors classical trust-region logic: expand
+the radius only when the local model is reliable and the step appears to be
+limited by the current radius.
 
 Important parameter compatibility note: the trust threshold must be on the same
 scale as the allowed alpha range. If `alpha_min=1e-3` and
@@ -938,10 +967,22 @@ is required for a meaningful local progress ratio.
 The implementation includes safeguards:
 
 - reject steps with `rho_t <= rho_min`;
-- shrink `alpha_t` if Adam's momentum direction is not descent-like;
+- floor tiny predicted decreases before computing rho;
+- use measured rho for acceptance and clipped rho for EMA/controller updates;
+- replace a non-descent Adam momentum direction with a negative-gradient
+  direction rescaled to the Adam-direction norm;
+- shrink `alpha_t` only in degenerate cases where no usable fallback direction
+  exists;
+- prevent a fully rejected trial sequence from increasing the next alpha;
+- use a single proportional gain `kp`; the earlier separate downward-gain
+  experiment is historical and no longer part of the active API;
 - clip `alpha_t` between `alpha_min` and `alpha_max`.
 - optionally update `alpha_t` from an EMA-smoothed rho signal and clip the
   multiplicative alpha update factor.
 - optionally force trust-region expansion after high-quality tiny accepted
-  steps, and log `alpha_next`, `alpha_update_factor`, and
-  `trust_region_expanded` in minibatch diagnostics.
+  steps with patience and a hard trust-expansion bound, and log `alpha_next`,
+  `alpha_update_factor`, and `trust_region_expanded` in minibatch diagnostics.
+- log `used_gradient_fallback` so non-descent Adam momentum events are visible
+  in future runs.
+- log `rho_clipped`, `predicted_decrease_safe`, `predicted_was_floored`,
+  `rho_was_clipped`, `direction_type`, and `trust_good_count`.

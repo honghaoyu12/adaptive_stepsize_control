@@ -345,6 +345,11 @@ def run_variant(case: BenchmarkCase, x0: np.ndarray, variant: TuningVariant):
             if variant.trust_region_expand_factor is None
             else variant.trust_region_expand_factor
         ),
+        trust_region_max_factor=(
+            case.trust_region_expand_factor
+            if variant.trust_region_expand_factor is None
+            else variant.trust_region_expand_factor
+        ),
     )
 
 

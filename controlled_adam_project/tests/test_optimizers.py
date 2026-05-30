@@ -81,6 +81,57 @@ def test_controlled_adam_reduces_quadratic_and_keeps_alpha_positive() -> None:
     assert history.fs[-1] < objective.value(x0)
     assert np.all(history.alphas > 0)
     assert history.rhos is not None
+    assert history.rhos_clipped is not None
+    assert history.predicted_decreases_safe is not None
     assert np.any(history.accepted)
     assert history.xs.shape[0] == 101
     np.testing.assert_allclose(history.xs[0], x0)
+
+
+def test_controlled_adam_uses_scaled_gradient_fallback_for_non_descent_momentum() -> None:
+    objective = AnisotropicQuadratic(curvature_x=1.0, curvature_y=1.0)
+    x0 = np.array([1.0, 0.0])
+    history = controlled_adam(
+        objective,
+        x0,
+        alpha0=1.5,
+        steps=2,
+        kp=0.0,
+        rho_star=0.5,
+        alpha_max=2.0,
+        max_backtracks=0,
+    )
+
+    assert history.gradient_fallback_used is not None
+    assert not history.gradient_fallback_used[0]
+    assert history.gradient_fallback_used[1]
+    assert history.accepted is not None
+    assert history.accepted[1]
+    assert history.descent_scores is not None
+    assert history.descent_scores[1] > 0.0
+    assert abs(history.xs[2, 0]) < abs(history.xs[1, 0])
+
+
+def test_controlled_adam_uses_clipped_rho_for_alpha_update() -> None:
+    objective = AnisotropicQuadratic(curvature_x=1.0, curvature_y=1.0)
+    x0 = np.array([1.0, 0.0])
+    history = controlled_adam(
+        objective,
+        x0,
+        alpha0=0.1,
+        steps=2,
+        kp=1.0,
+        rho_star=0.0,
+        alpha_max=10.0,
+        rho_clip_max=0.1,
+        max_backtracks=0,
+    )
+
+    assert history.rhos is not None
+    assert history.rhos_clipped is not None
+    assert history.rho_was_clipped is not None
+    assert history.rhos[0] > 0.1
+    assert history.rhos_clipped[0] == 0.1
+    assert history.rho_was_clipped[0]
+    np.testing.assert_allclose(history.alphas[0], 0.1)
+    np.testing.assert_allclose(history.alphas[1], 0.1 * np.exp(0.1))

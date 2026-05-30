@@ -1,6 +1,6 @@
 # Conversation Log
 
-Last updated: 2026-05-27
+Last updated: 2026-05-30
 
 Current handoff note: see `PROJECT_HANDOFF.md` first. For a concise
 chronological engineering timeline, see `DEVELOPMENT_LOG.md`. This file remains
@@ -1954,16 +1954,16 @@ came from the rho target itself, not from backtracking recovery. Raw-rho
 preferred `1.5e-3` to `1.75e-3`; EMA preferred more headroom on this
 single-seed subset.
 
-We added optional asymmetric gain to controlled Adam:
+We briefly added optional asymmetric gain to controlled Adam:
 
 ```text
 gain = kp if rho_control >= rho_star else kp_down
 ```
 
-This is available as `TorchControlledAdam(..., kp_down=...)` and
-`--controlled-kp-down` in the CIFAR comparison runner. If omitted,
-`kp_down=kp`, so old behavior is preserved. The full current algorithm is now
-documented in:
+This was tested as `TorchControlledAdam(..., kp_down=...)` and
+`--controlled-kp-down` in the CIFAR comparison runner, but it is no longer part
+of the active API. The current implementation exposes only `kp`, so the full
+current algorithm is documented in:
 
 ```text
 controlled_adam_project/CONTROLLED_ADAM_ALGORITHM.md
@@ -1983,6 +1983,23 @@ rho_star=0.80, kp_down=0.08     0.6950          0.7330      mostly reaches cap
 Interpretation: raising `rho_star` works mechanically and makes alpha
 self-limiting, but `0.85` was too conservative for the 20-epoch setup.
 Asymmetric downward gain delayed saturation but did not fix it because the
-average rho signal was still above target. The next useful middle-ground test
-is probably `rho_star=0.825`, `kp=0.02`, `kp_down=0.04` or `0.06`,
+average rho signal was still above target. It also added one more
+hyperparameter, so we removed it from the active code. The next useful
+middle-ground test is probably `rho_star=0.825`, `kp=0.02`,
 `alpha_max=2.25e-3`.
+
+We then reviewed `controlled_adam_production_fix_plan_v5.md` and implemented a
+v5.1 subset for controlled Adam. The implemented version keeps the
+norm-matched negative-gradient fallback instead of raw `-g`, adds a
+predicted-decrease floor, clips rho before EMA/controller updates, prevents a
+fully rejected trial sequence from increasing alpha, changes the default
+backtracking depth to one emergency shrink, and makes trust expansion
+patience-based with a hard expansion bound. AdamW mode from the v5 plan was
+left for a separate semantic patch.
+
+We then simplified `controlled_adam_project/CONTROLLED_ADAM_ALGORITHM.md` for
+readability. The note now focuses on the controlled Adam core without EMA/trust
+details, writes rho directly in terms of the minibatch loss instead of
+introducing extra `A/P` notation, maps each plain-language flow item to the
+algorithm section, and explains why rho, the multiplicative factor, and alpha
+are clipped separately.

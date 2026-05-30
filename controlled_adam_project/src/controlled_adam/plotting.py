@@ -205,6 +205,21 @@ def save_controlled_diagnostics(
 
     output_dir = ensure_output_dir(output_dir)
     path = output_dir / f"{objective_name}_controlled_adam_diagnostics.csv"
+    fallback_used = history.gradient_fallback_used
+    if fallback_used is None:
+        fallback_used = np.zeros_like(history.alphas, dtype=int)
+    rhos_clipped = history.rhos_clipped
+    if rhos_clipped is None:
+        rhos_clipped = np.full_like(history.alphas, np.nan, dtype=float)
+    predicted_safe = history.predicted_decreases_safe
+    if predicted_safe is None:
+        predicted_safe = history.predicted_decreases
+    predicted_floored = history.predicted_was_floored
+    if predicted_floored is None:
+        predicted_floored = np.zeros_like(history.alphas, dtype=int)
+    rho_clipped_flags = history.rho_was_clipped
+    if rho_clipped_flags is None:
+        rho_clipped_flags = np.zeros_like(history.alphas, dtype=int)
 
     data = np.column_stack(
         [
@@ -213,15 +228,21 @@ def save_controlled_diagnostics(
             history.alphas,
             history.grad_norms,
             history.rhos,
+            rhos_clipped,
             history.predicted_decreases,
+            predicted_safe,
             history.actual_decreases,
             history.accepted.astype(int),
             history.descent_scores,
+            fallback_used.astype(int),
+            predicted_floored.astype(int),
+            rho_clipped_flags.astype(int),
         ]
     )
     header = (
-        "iteration,f,alpha,grad_norm,rho,predicted_decrease,"
-        "actual_decrease,accepted,descent_score"
+        "iteration,f,alpha,grad_norm,rho,rho_clipped,predicted_decrease,"
+        "predicted_decrease_safe,actual_decrease,accepted,descent_score,"
+        "used_gradient_fallback,predicted_was_floored,rho_was_clipped"
     )
     np.savetxt(path, data, delimiter=",", header=header, comments="")
 

@@ -37,6 +37,7 @@ TUNED_PRESET = {
     "trust_region_rho_threshold": 0.60,
     "trust_alpha_threshold_factor": 3.0,
     "trust_region_expand_factor": 3.0,
+    "trust_region_max_factor": 3.0,
 }
 
 OPTIMIZER_LABELS = {
@@ -190,6 +191,7 @@ def run_case(
             trust_region_rho_threshold=TUNED_PRESET["trust_region_rho_threshold"],
             trust_region_alpha_threshold=trust_alpha_threshold,
             trust_region_expand_factor=TUNED_PRESET["trust_region_expand_factor"],
+            trust_region_max_factor=TUNED_PRESET["trust_region_max_factor"],
         )
         histories[(start_id, "controlled_ema_trust")] = trust
         rows.append(
@@ -214,6 +216,7 @@ def write_tuned_config_csv(cases: list[base.BenchmarkCase], path: Path) -> None:
         "trust_region_rho_threshold",
         "trust_region_alpha_threshold",
         "trust_region_expand_factor",
+        "trust_region_max_factor",
     ]
     rows = []
     for case in cases:
@@ -237,6 +240,9 @@ def write_tuned_config_csv(cases: list[base.BenchmarkCase], path: Path) -> None:
                 ),
                 "trust_region_expand_factor": TUNED_PRESET[
                     "trust_region_expand_factor"
+                ],
+                "trust_region_max_factor": TUNED_PRESET[
+                    "trust_region_max_factor"
                 ],
             }
         )
@@ -396,6 +402,7 @@ def generate_report(
     lines.append("trust_region_rho_threshold = 0.60")
     lines.append("trust_region_alpha_threshold = 3 * alpha0")
     lines.append("trust_region_expand_factor = 3")
+    lines.append("trust_region_max_factor = 3")
     lines.append("```")
     lines.append("")
     lines.append(
@@ -466,7 +473,7 @@ def generate_report(
     lines.append("## Interpretation")
     lines.append("")
     lines.append(
-        "- If a tuned controlled variant beats vanilla Adam, the preset found a more useful scalar step scale on top of the same Adam direction."
+        "- If a tuned controlled variant beats vanilla Adam, the preset found a more useful scalar step scale on top of Adam-style directions, with fallback events preventing non-descent momentum skips."
     )
     lines.append(
         "- If gradient descent wins on a simple convex objective, that is a reminder that no adaptive direction is universally best under every finite budget."
